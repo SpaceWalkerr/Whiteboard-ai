@@ -1,0 +1,35 @@
+{
+  "name": "@whiteboard/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./env": "./src/env/index.ts",
+    "./env/server": "./src/env/server.ts",
+    "./env/web": "./src/env/web.ts",
+    "./schemas": "./src/schemas/index.ts",
+    "./db": "./src/db/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx --env-file-if-exists=../../apps/server/.env src/db/migrate.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "catalog:",
+    "postgres": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@whiteboard/config": "workspace:*",
+    "drizzle-kit": "0.31.11",
+    "eslint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

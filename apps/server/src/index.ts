@@ -1,0 +1,77 @@
+import { EnvValidationError, loadEnv } from "@whiteboard/shared/env";
+import { serverEnvSchema, type ServerEnv } from "@whiteboard/shared/env/server";
+import { createDb } from "@whiteboard/shared/db";
+import { buildApp } from "./app";
+import { createOriginMatcher } from "./http/origins";
+import { closeRedis, createRedis } from "./infra/redis";
+import { createLogger } from "./logger";
+import { createShutdown } from "./shutdown";
+import { attachSyncServer, closeSyncServer } from "./sync/upgrade";
+
+function readEnvOrExit(): ServerEnv {
+  try {
+    return loadEnv(serverEnvSchema, process.env);
+  } catch (error) {
+    if (error instanceof EnvValidationError) {
+      // The logger isn't configured yet (it depends on env), so write directly.
+      process.stderr.write(`[whiteboard-server] Refusing to start. ${error.message}\n`);
+      process.exit(1);
+    }
+    throw error;
+  }
+}
+
+async function main(): Promise<void> {
+  const env = readEnvOrExit();
+  const logger = createLogger(env);
+
+  const { sql } = createDb(env.DATABASE_URL, { applicationName: "whiteboard-server" });
+  // Redis is optional outside production for now (the env schema enforces it in production).
+  const redis = env.REDIS_URL === undefined ? undefined : createRedis(env.REDIS_URL, logger);
+  if (redis === undefined) logger.warn("REDIS_URL not set; running without Redis");
+  const isAllowedOrigin = createOriginMatcher({
+    allowedOrigins: env.CORS_ALLOWED_ORIGINS,
+    allowedOriginPattern: env.CORS_ALLOWED_ORIGIN_PATTERN,
+  });
+
+  const app = buildApp({
+    logger,
+    isAllowedOrigin,
+    readinessChecks: [
+      { name: "postgres", check: () => sql`select 1` },
+      ...(redis ? [{ name: "redis", check: () => redis.ping() }] : []),
+    ],
+  });
+  const wss = attachSyncServer(app.server, { isAllowedOrigin, logger });
+
+  const shutdown = createShutdown({
+    logger,
+    timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    steps: [
+      { name: "websockets", run: () => closeSyncServer(wss) },
+      { name: "http", run: () => app.close() },
+      ...(redis ? [{ name: "redis", run: () => closeRedis(redis) }] : []),
+      { name: "postgres", run: () => sql.end({ timeout: 5 }) },
+    ],
+  });
+
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.on("unhandledRejection", (reason) => {
+    logger.fatal({ err: reason }, "unhandled promise rejection");
+    void shutdown("unhandledRejection", 1);
+  });
+  process.on("uncaughtException", (error) => {
+    logger.fatal({ err: error }, "uncaught exception");
+    void shutdown("uncaughtException", 1);
+  });
+
+  await app.listen({ host: env.HOST, port: env.PORT });
+}
+
+main().catch((error: unknown) => {
+  process.stderr.write(
+    `[whiteboard-server] Failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
+  process.exit(1);
+});

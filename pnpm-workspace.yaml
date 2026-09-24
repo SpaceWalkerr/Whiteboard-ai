@@ -1,0 +1,18 @@
+packages:
+  - apps/*
+  - packages/*
+
+# pnpm 10 blocks dependency install scripts by default; allow only the ones we need.
+onlyBuiltDependencies:
+  - esbuild
+
+# Versions used by more than one package are pinned once here and referenced as "catalog:".
+catalog:
+  "@types/node": 22.20.4
+  drizzle-orm: 0.45.3
+  eslint: 9.39.5
+  postgres: 3.4.9
+  tsx: 4.23.15
+  typescript: 5.9.3
+  vitest: 4.1.11
+  zod: 4.6.5

@@ -1,0 +1,11 @@
+pnpm-lock.yaml
+dist/
+coverage/
+playwright-report/
+test-results/
+packages/shared/src/db/migrations/meta/
+whiteboard-ai-build-prompts.md
+.claude/
+# Hand-maintained docs owned by the project lead; don't reflow them.
+CLAUDE.md
+SPEC.md

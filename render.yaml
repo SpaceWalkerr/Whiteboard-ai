@@ -1,0 +1,47 @@
+# Render Blueprint — STUB. Describes the production shape; actual deployment (staging and
+# production services, secrets, domains) happens in Phase 13. Keep in sync with CLAUDE.md.
+services:
+  - type: web
+    name: whiteboard-server
+    runtime: node
+    region: singapore # co-located with Supabase ap-southeast-1
+    plan: starter # paid: the free tier sleeps and drops WebSockets
+    numInstances: 2 # must work as 2+ instances (shared state via Redis)
+    buildCommand: >-
+      corepack enable &&
+      pnpm install --frozen-lockfile &&
+      pnpm turbo run build --filter=@whiteboard/server
+    startCommand: node --enable-source-maps apps/server/dist/index.js
+    healthCheckPath: /readyz
+    # Our in-app shutdown deadline (SHUTDOWN_TIMEOUT_MS=25000) must stay below this.
+    maxShutdownDelaySeconds: 30
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: HUSKY
+        value: "0" # skip git hook install during the build
+      - key: LOG_LEVEL
+        value: info
+      - key: SHUTDOWN_TIMEOUT_MS
+        value: "25000"
+      - key: DATABASE_URL # Supabase pooler, SESSION mode (port 5432)
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: CORS_ALLOWED_ORIGIN_PATTERN
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: whiteboard-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: whiteboard-redis
+    region: singapore # SAME region as the web service
+    plan: starter
+    maxmemoryPolicy: noeviction # leases and rate-limit counters must never be silently evicted
+    ipAllowList: [] # private network only
