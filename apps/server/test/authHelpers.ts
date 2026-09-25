@@ -123,7 +123,7 @@ export interface ApiServer {
 export async function startApiServer(
   db: Database,
   verifier: ApiDeps["verifier"],
-  extras: Pick<ApiDeps, "thumbnails" | "cronSecret"> = {},
+  extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai"> = {},
 ): Promise<ApiServer> {
   const mailer = new MemoryMailer();
   const repository = new PgBoardRepository(db);

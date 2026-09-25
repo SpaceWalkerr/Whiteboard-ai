@@ -1,6 +1,6 @@
 import { keysAbove, SYSTEM_SHAPE_TYPES, type Shape } from "@whiteboard/shared/board";
 import type { Presence, PresenceUser, SaveState, SyncStatus } from "@whiteboard/shared/sync";
-import type { DesignCheckResult } from "@whiteboard/graph";
+import type { DesignCheckResult, ReviewRecord } from "@whiteboard/graph";
 import type { BoardController } from "./controller";
 import { resolveArrow, type ArrowGeometry } from "./geometry/arrow";
 import { createArrowShape, createBoxShape, DEFAULT_SIZES } from "./model/defaults";
@@ -22,8 +22,10 @@ export interface WhiteboardDebug {
   me: () => PresenceUser;
   /** Latest "Check design" result, or null before the first check. */
   designCheck: () => DesignCheckResult | null;
-  /** Shapes highlighted on the canvas for the selected finding. */
+  /** Shapes highlighted on the canvas for the selected finding (design check or AI review). */
   designCheckFocus: () => readonly string[] | null;
+  /** The AI review shown in the panel, if any. */
+  aiReview: () => ReviewRecord | null;
   viewport: () => Viewport;
   setViewport: (viewport: Viewport) => void;
   /** Adds a grid of `count` shapes (≈75% system shapes, 25% arrows connecting neighbours). */
@@ -43,6 +45,7 @@ export interface DebugExtras {
   me: () => PresenceUser;
   designCheck: () => DesignCheckResult | null;
   designCheckFocus: () => readonly string[] | null;
+  aiReview: () => ReviewRecord | null;
 }
 
 export function installDebugTools(

@@ -63,6 +63,7 @@ describe("loadEnv(serverEnvSchema)", () => {
     METRICS_TOKEN: "m".repeat(32),
     SUPABASE_SERVICE_ROLE_KEY: "service-role-key-0123456789",
     CRON_SECRET: "c".repeat(32),
+    ANTHROPIC_API_KEY: "sk-ant-test-0123456789abcdef",
     EMAIL_TRANSPORT: "resend",
     RESEND_API_KEY: "re_0123456789",
     EMAIL_FROM: "Whiteboard <no-reply@example.com>",
@@ -77,6 +78,7 @@ describe("loadEnv(serverEnvSchema)", () => {
     ["METRICS_TOKEN", "is required in production"],
     ["SUPABASE_SERVICE_ROLE_KEY", "is required in production"],
     ["CRON_SECRET", "is required in production"],
+    ["ANTHROPIC_API_KEY", "is required in production"],
     ["RESEND_API_KEY", "is required when EMAIL_TRANSPORT=resend"],
     ["EMAIL_FROM", "is required when EMAIL_TRANSPORT=resend"],
   ])("requires %s in production", (variable, problem) => {
@@ -84,6 +86,16 @@ describe("loadEnv(serverEnvSchema)", () => {
       loadEnv(serverEnvSchema, { ...productionEnv, [variable]: "" }),
     );
     expect(error.issues).toEqual([{ variable, problem }]);
+  });
+
+  it("parses the AI settings with safe defaults", () => {
+    const env = loadEnv(serverEnvSchema, validServerEnv);
+    expect(env.AI_ENABLED).toBe(true);
+    expect(env.AI_DAILY_SPEND_LIMIT_USD).toBe(20);
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(loadEnv(serverEnvSchema, { ...validServerEnv, AI_ENABLED: "false" }).AI_ENABLED).toBe(
+      false,
+    );
   });
 
   it("refuses the log email transport in production", () => {

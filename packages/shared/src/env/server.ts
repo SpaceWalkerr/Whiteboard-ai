@@ -122,6 +122,32 @@ export const serverEnvSchema = z
     /** How often each room re-checks with the other instances for missed updates. */
     SYNC_RESYNC_MS: z.coerce.number().int().min(1_000).max(600_000).default(15_000),
 
+    /**
+     * Anthropic API key for AI reviews and hints. Server-only; never sent to the browser.
+     * Optional in development (AI routes then answer 503), required in production.
+     */
+    ANTHROPIC_API_KEY: z.string().min(20).optional(),
+    /** Global AI switch: "false" blocks every Claude call immediately (incident lever). */
+    AI_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
+    /**
+     * Kill-switch: once today's (UTC) spend across all users reaches this many US dollars,
+     * AI calls are refused until midnight UTC. 0 blocks all calls.
+     */
+    AI_DAILY_SPEND_LIMIT_USD: z.coerce.number().min(0).max(100_000).default(20),
+    /** Output cap per review (thinking + JSON); bounds the worst-case cost of one review. */
+    AI_REVIEW_MAX_TOKENS: z.coerce.number().int().min(1024).max(64_000).default(16_000),
+    /** Reasoning effort for reviews (Claude's `output_config.effort`). */
+    AI_REVIEW_EFFORT: z.enum(["low", "medium", "high"]).default("high"),
+    /** Largest graph (components + connections) accepted for review; bounds input cost. */
+    AI_REVIEW_MAX_ELEMENTS: z.coerce.number().int().min(10).max(5_000).default(600),
+    /** Output cap per live-hint call. */
+    AI_HINT_MAX_TOKENS: z.coerce.number().int().min(128).max(4_096).default(800),
+    /** Live-hint calls per user per hour. */
+    AI_HINTS_PER_HOUR: z.coerce.number().int().min(0).max(1_000).default(20),
+
     /** Hard deadline for graceful shutdown; must stay below Render's shutdown window. */
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(290_000).default(25_000),
   })
@@ -134,6 +160,7 @@ export const serverEnvSchema = z
     require("METRICS_TOKEN", production, "is required in production");
     require("SUPABASE_SERVICE_ROLE_KEY", production, "is required in production");
     require("CRON_SECRET", production, "is required in production");
+    require("ANTHROPIC_API_KEY", production, "is required in production");
     if (production && env.EMAIL_TRANSPORT !== "resend") {
       ctx.addIssue({
         code: "custom",

@@ -3,6 +3,8 @@ import { serverEnvSchema, type ServerEnv } from "@whiteboard/shared/env/server";
 import { createDb } from "@whiteboard/shared/db";
 import { LimitedWritesRepository } from "./persistence/limitedWrites";
 import { PgBoardRepository } from "./persistence/pgRepository";
+import { AnthropicModel } from "./ai/model";
+import { HINT_MODEL, REVIEW_MODEL } from "./ai/pricing";
 import { buildApp } from "./app";
 import { createOriginMatcher } from "./http/origins";
 import { closeRedis, createRedis } from "./infra/redis";
@@ -70,6 +72,8 @@ async function main(): Promise<void> {
     ? new SupabaseThumbnailStorage(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
     : undefined;
   if (!thumbnails) logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; board thumbnails are disabled");
+  if (!env.ANTHROPIC_API_KEY)
+    logger.warn("ANTHROPIC_API_KEY not set; AI reviews and hints are disabled");
 
   const metrics = createSyncMetrics();
   // With Redis, this is one of several instances: rooms are shared through pub/sub and a
@@ -101,6 +105,22 @@ async function main(): Promise<void> {
       thumbnails,
       boardStore: repository,
       cronSecret: env.CRON_SECRET,
+      ai: {
+        model: env.ANTHROPIC_API_KEY ? new AnthropicModel(env.ANTHROPIC_API_KEY) : undefined,
+        enabled: env.AI_ENABLED,
+        dailySpendLimitUsd: env.AI_DAILY_SPEND_LIMIT_USD,
+        review: {
+          model: REVIEW_MODEL,
+          maxTokens: env.AI_REVIEW_MAX_TOKENS,
+          effort: env.AI_REVIEW_EFFORT,
+        },
+        hints: {
+          model: HINT_MODEL,
+          maxTokens: env.AI_HINT_MAX_TOKENS,
+          perHour: env.AI_HINTS_PER_HOUR,
+        },
+        maxElements: env.AI_REVIEW_MAX_ELEMENTS,
+      },
     },
   });
   const sync = attachSyncServer(app.server, {

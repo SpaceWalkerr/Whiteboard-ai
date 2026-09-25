@@ -47,3 +47,35 @@ export class ConflictError extends AppError {
 export interface ErrorBody {
   error: { code: string; message: string };
 }
+
+/** The caller's plan doesn't include this, or its allowance is used up (upgrade prompt). */
+export class PaymentRequiredError extends AppError {
+  constructor(code: "QUOTA_EXCEEDED" | "PLAN_REQUIRED", message: string) {
+    super(402, code, message);
+  }
+}
+
+export class TooManyRequestsError extends AppError {
+  constructor(code: string, message: string) {
+    super(429, code, message);
+  }
+}
+
+export class PayloadTooLargeError extends AppError {
+  constructor(message: string) {
+    super(413, "TOO_LARGE", message);
+  }
+}
+
+export class UnprocessableError extends AppError {
+  constructor(code: string, message: string) {
+    super(422, code, message);
+  }
+}
+
+/** A dependency is switched off or unavailable (AI disabled, spend limit reached, ...). */
+export class ServiceUnavailableError extends AppError {
+  constructor(code: string, message: string) {
+    super(503, code, message);
+  }
+}

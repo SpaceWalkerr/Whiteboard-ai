@@ -52,6 +52,12 @@ services:
         generateValue: true
       - key: CRON_SECRET # bearer for /internal/* (trash purge cron, Phase 13)
         generateValue: true
+      - key: ANTHROPIC_API_KEY # AI reviews/hints; server-only, never sent to the browser
+        sync: false
+      - key: AI_DAILY_SPEND_LIMIT_USD # kill-switch: AI calls stop for the day at this spend
+        value: "20"
+      - key: AI_ENABLED # set to "false" to stop every Claude call immediately
+        value: "true"
       - key: APP_URL # web origin used in invite links
         sync: false
       - key: EMAIL_TRANSPORT

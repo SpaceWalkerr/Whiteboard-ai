@@ -6,6 +6,7 @@ import { registerFolderRoutes } from "./folders";
 export { registerInternalRoutes } from "./internal";
 import type { ApiDeps } from "./deps";
 import { registerMeRoutes } from "./me";
+import { registerReviewRoutes } from "./reviews";
 import { registerSharingRoutes } from "./sharing";
 
 /**
@@ -27,4 +28,5 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   registerSharingRoutes(app, deps);
   registerFolderRoutes(app, deps);
   registerBoardExtraRoutes(app, deps);
+  registerReviewRoutes(app, deps);
 }

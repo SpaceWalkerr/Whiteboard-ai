@@ -30,6 +30,8 @@ interface Options {
   onQuickInsert: () => void;
   /** Runs the rule-based design check and shows its results. */
   onCheckDesign: () => void;
+  /** Opens the AI design review. */
+  onAiReview: () => void;
   onSpaceChange: (pressed: boolean) => void;
   /** Gets first go at Escape (e.g. to stop following someone); return true if handled. */
   onEscape?: (() => boolean) | undefined;
@@ -51,6 +53,7 @@ export function useBoardKeyboard(options: Options): void {
     onShowShortcuts,
     onQuickInsert,
     onCheckDesign,
+    onAiReview,
     onSpaceChange,
     onEscape,
   } = options;
@@ -145,6 +148,9 @@ export function useBoardKeyboard(options: Options): void {
         case "checkDesign":
           onCheckDesign();
           break;
+        case "aiReview":
+          onAiReview();
+          break;
       }
     };
 
@@ -198,6 +204,7 @@ export function useBoardKeyboard(options: Options): void {
     onShowShortcuts,
     onQuickInsert,
     onCheckDesign,
+    onAiReview,
     onSpaceChange,
     onEscape,
   ]);

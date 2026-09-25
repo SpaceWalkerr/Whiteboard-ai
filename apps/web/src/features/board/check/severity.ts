@@ -9,6 +9,8 @@ export interface SeverityMeta {
   canvasColor: string;
   /** Badge classes: text ≥ 4.5:1 on its background. Severity is never shown by colour alone. */
   badgeClass: string;
+  /** Numbered AI-review pins: white text on this background (≥ 4.5:1). */
+  pinClass: string;
 }
 
 export const SEVERITY_META: Record<Severity, SeverityMeta> = {
@@ -18,6 +20,7 @@ export const SEVERITY_META: Record<Severity, SeverityMeta> = {
     icon: OctagonAlert,
     canvasColor: "#dc2626",
     badgeClass: "bg-red-50 text-red-800 border-red-200",
+    pinClass: "bg-red-600",
   },
   warning: {
     label: "Warning",
@@ -25,6 +28,7 @@ export const SEVERITY_META: Record<Severity, SeverityMeta> = {
     icon: TriangleAlert,
     canvasColor: "#d97706",
     badgeClass: "bg-amber-50 text-amber-900 border-amber-200",
+    pinClass: "bg-amber-700",
   },
   info: {
     label: "Info",
@@ -32,6 +36,7 @@ export const SEVERITY_META: Record<Severity, SeverityMeta> = {
     icon: Info,
     canvasColor: "#2563eb",
     badgeClass: "bg-blue-50 text-blue-800 border-blue-200",
+    pinClass: "bg-blue-600",
   },
 };
 

@@ -26,7 +26,8 @@ export type ShortcutAction =
   | "zoomIn"
   | "zoomOut"
   | "showShortcuts"
-  | "checkDesign";
+  | "checkDesign"
+  | "aiReview";
 
 interface KeyMatch {
   /** Compared case-insensitively with KeyboardEvent.key. */
@@ -257,6 +258,13 @@ export const SHORTCUTS: readonly Shortcut[] = [
     description: "Check design",
     keys: ["Shift", "C"],
     match: [{ key: "c", shift: true }],
+  },
+  {
+    action: "aiReview",
+    group: "Review",
+    description: "AI design review",
+    keys: ["Shift", "R"],
+    match: [{ key: "r", shift: true }],
   },
 ];
 

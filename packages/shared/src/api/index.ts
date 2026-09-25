@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PLANS } from "../plans";
 
 /**
  * REST API contract between apps/web and apps/server. Request bodies are validated with these
@@ -138,3 +139,18 @@ export type BoardDetail = z.infer<typeof boardDetailSchema>;
 export const errorResponseSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }),
 });
+
+export const planSchema = z.enum(PLANS);
+
+/** GET /me/ai-quota: the caller's plan and AI usage this month (UTC). */
+export const aiQuotaSchema = z.object({
+  plan: planSchema,
+  reviewsUsed: z.number().int().nonnegative(),
+  reviewsLimit: z.number().int().nonnegative(),
+  /** ISO time the monthly allowance resets (start of next month, UTC). */
+  resetsAt: z.string(),
+  liveHints: z.boolean(),
+  /** False when AI is switched off or not configured on the server. */
+  available: z.boolean(),
+});
+export type AiQuota = z.infer<typeof aiQuotaSchema>;

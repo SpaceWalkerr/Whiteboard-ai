@@ -24,6 +24,14 @@ export interface ApiClient {
     path: string,
     options: { method: string; body: Blob; shareToken?: string | undefined },
   ): Promise<void>;
+  /**
+   * POSTs JSON and returns the streamed response body (server-sent events). Errors before
+   * the stream starts (401/402/403/503…) throw ApiRequestError like other calls.
+   */
+  stream(
+    path: string,
+    options: { body: unknown; shareToken?: string | undefined; signal?: AbortSignal },
+  ): Promise<ReadableStream<Uint8Array>>;
 }
 
 /**
@@ -34,7 +42,13 @@ export function createApiClient(
   apiUrl: string,
   getAccessToken: () => Promise<string | null>,
 ): ApiClient {
-  const call = async (path: string, method: string, body: unknown, shareToken?: string) => {
+  const call = async (
+    path: string,
+    method: string,
+    body: unknown,
+    shareToken?: string,
+    signal?: AbortSignal,
+  ) => {
     const token = await getAccessToken();
     const binary = body instanceof Blob;
     let response: Response;
@@ -49,8 +63,10 @@ export function createApiClient(
           ...(shareToken ? { "x-share-token": shareToken } : {}),
         },
         ...(body !== undefined ? { body: binary ? body : JSON.stringify(body) } : {}),
+        ...(signal ? { signal } : {}),
       });
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       throw new ApiRequestError(0, "NETWORK", "Could not reach the server. Check your connection.");
     }
     if (!response.ok) {
@@ -80,6 +96,16 @@ export function createApiClient(
     },
     async upload(path, { method, body, shareToken }) {
       await call(path, method, body, shareToken);
+    },
+    async stream(path, { body, shareToken, signal }) {
+      const response = await call(path, "POST", body, shareToken, signal);
+      if (!response.body)
+        throw new ApiRequestError(
+          response.status,
+          "BAD_RESPONSE",
+          "Unexpected response from the server.",
+        );
+      return response.body;
     },
   };
 }

@@ -2,8 +2,9 @@
 
 ## Current phase
 
-Phase 6 — Typed graph + deterministic rules engine: implemented, awaiting manual verification.
-Phases 0–5 committed.
+Phase 7 — AI design review: implemented, awaiting manual verification (and a first eval run
+with a real `ANTHROPIC_API_KEY`). Built on top of Phase 6, which is also still uncommitted
+(implemented, awaiting manual verification). Phases 0–5 committed.
 
 ## Done
 
@@ -326,6 +327,90 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   Replica role + Replication arrow → stale notice → Re-check → finding gone; Escape/Shift+C).
 - **Measured:** `checkDesign` on a 2,000-shape board ≈ 17 ms (dev Mac, Node).
 
+### Phase 7 — AI design review (Claude)
+
+- **Data** (migration `0005_ai_reviews`, RLS on, no policies — covered by the RLS guard test):
+  `entitlements` (user → plan free/pro/team + optional monthly review override; no row =
+  Free), `reviews` (board, requester, status running/completed/failed, problem statement,
+  requirements, the reviewed graph + rule findings, validated result, error code),
+  `ai_usage` (one row per Claude call — kind, model, status, input/output/cache-write/
+  cache-read tokens, cost in micro-USD, latency, Anthropic request id, hint fingerprint; no
+  FKs so spend records outlive boards/users). Plan limits in `packages/shared/src/plans.ts`
+  (Free 5 reviews/month, Pro 100 + live hints, Team 300/seat + live hints).
+- **Contract** (`packages/graph/src/review.ts`): review request, AI review (summary, 1–10
+  score per dimension — scalability, reliability, data design, security, cost — findings
+  {severity, dimension, title, explanation, shapeIds, suggestion, ruleId}, follow-up
+  questions), stored record + summaries, streamed events, hints, `diffReviews` (matches
+  findings by dimension/rule + ≥ 50 % shared shapes → new / still open / resolved + score
+  deltas), `graphFingerprint` (kinds, labels, settings, connections — not positions/styles).
+- **Server** (`apps/server/src/ai/`, `src/api/reviews.ts`):
+  - `POST /boards/:id/reviews`: sign-in + read access (viewers included; billed to the
+    requester) → AI switch / API key / daily spend kill-switch (503) → reads the board **from
+    the database**, never the request body → empty (422) / oversized (413, >600 elements) →
+    quota check + `running` reservation in one transaction under a per-user advisory lock
+    (402 `QUOTA_EXCEEDED`, Claude never called) → server-sent events (stage/progress/done/
+    error, 15 s keep-alive). Client disconnect aborts the Claude call.
+  - Claude call: `claude-sonnet-5`, adaptive thinking, effort `high` (env), `max_tokens`
+    16,000 (env), streaming, **structured outputs** with a hand-written JSON schema (the
+    SDK's zod converter drops enums), **no tools**, static system prompt cached with
+    `cache_control` (6.1k characters ≈ 1.5k tokens, above Sonnet 5's 1,024-token minimum).
+  - The graph is sent as compact JSON with short refs (`n1`, `e1`, `g1`) inside
+    `<untrusted_board_data>`; labels/requirements are NFKC-normalised, control and format
+    characters stripped, length-capped and `<`/`>`/`&` escaped so text can't close the tag.
+    The system prompt says the block is data, never instructions, and asks the model to
+    report instruction-like labels as an info finding.
+  - Repair, no second paid call: refs → canvas ids (a finding on an arrow highlights the
+    arrow), a real canvas id or an exact unique label is accepted, anything else dropped; a
+    finding with no valid shape is dropped; scores clamped; text trimmed; findings sorted by
+    severity and numbered `f1…`; the result is re-validated against the public schema.
+  - Every call writes `ai_usage` (ok/error/refused/truncated/invalid_output/aborted) in the
+    same transaction as the review's status change. Quota counts completed reviews and
+    user-aborted ones (tokens were spent) + live reservations (< 10 min); our failures are
+    free. `GET /boards/:id/reviews`, `GET /boards/:id/reviews/:reviewId` (read access),
+    `GET /me/ai-quota`.
+  - `POST /boards/:id/hints` (editors, Pro/Team else 402 `PLAN_REQUIRED`): < 3 components or
+    the same graph fingerprint as my last hint on this board within the hour → skipped with
+    no call; `AI_HINTS_PER_HOUR` (20) per user → 429; `claude-haiku-4-5-20251001`, 0–3
+    hints, same data block and repair; best effort (failures return no hints).
+  - Env: `ANTHROPIC_API_KEY` (required in production; without it AI routes answer 503),
+    `AI_ENABLED`, `AI_DAILY_SPEND_LIMIT_USD` (20), `AI_REVIEW_MAX_TOKENS`, `AI_REVIEW_EFFORT`,
+    `AI_REVIEW_MAX_ELEMENTS`, `AI_HINT_MAX_TOKENS`, `AI_HINTS_PER_HOUR`; `.env.example` and
+    `render.yaml` updated.
+  - `pnpm --filter @whiteboard/server plan:set <email> <free|pro|team> [reviews/month|-]`
+    (development/test only; writes an `entitlement.change` audit row).
+- **Web:** "AI review" button (signed-in users) + `Shift+R` (in the "?" sheet). Panel:
+  history picker, progress steps (with tokens written, Cancel), summary, score meters,
+  numbered findings (severity + dimension badges; click → highlight + zoom), "Compare with
+  the previous review" (New / Still open badges, resolved list, score deltas), follow-up
+  questions, "board changed since this review", live-hints toggle. Start dialog: problem
+  statement + requirements (pre-filled from the last review), "N of M reviews left", what is
+  sent to Anthropic, waits for "Saved". Numbered pins over the canvas (HTML buttons with
+  labels; top-right of a box / middle of an arrow; stacked when several). 402 → upgrade
+  dialog with the plan comparison ("Upgrade — coming soon"). Hint cards at the bottom
+  (Show on board / Dismiss; dismissed stays dismissed for the same shapes). The design
+  check and AI review panels are mutually exclusive.
+- **Eval** (`apps/server/eval/`, `pnpm --filter @whiteboard/server eval:review`): 15 fixture
+  boards with 16 planted flaws (write scaling for a URL shortener, DB SPOF, client → DB,
+  payment retries without idempotency, in-memory sessions, celebrity fan-out, public API
+  without rate limits, blocking slow vendor, queue without DLQ, dual write to search, video
+  without CDN, chat by polling, prompt-injection label, `LIKE '%q%'` search, analytics on the
+  OLTP primary). Deterministic grading (no LLM judge): a flaw is caught when a finding points
+  at one of its shapes, is at least its severity and matches its keywords. Prints per-board
+  results + cost; JSON in `eval/results/` (gitignored); exits 1 below 12/15.
+- **Tests:** server +59 (`ai.test.ts` 18: pricing, data block/escaping, schema agreement,
+  repair, every model outcome; `reviews.pg.test.ts` 22 with a fake model on real Postgres:
+  401/403/400/422/413 without a call, stream + stored review + `ai_usage` tokens/cost,
+  escaped hostile label, ref repair, list/get authz, 4 failure kinds (logged, quota unused),
+  client abort (call cancelled, counted), 402 without a call, parallel requests at quota − 1
+  → one 200 + one 402, `AI_ENABLED=false`, spend limit, no key, hints plan/role/skip/hourly
+  cap; `evalGrade.test.ts` 19: fixtures valid, grader credits only the right findings).
+  Graph +7 (diff, fingerprint, contract). Web +19 (SSE parsing across chunks, store: open/
+  stream/402/errors/cancel, hints: 8 s debounce, ≥ 3 components, moves and other people's
+  edits don't trigger, dismiss, 429 pause; pins placement + buttons; panel, comparison,
+  progress, upgrade dialog, shortcut). Playwright +2 (`review.spec.ts`, review API mocked in
+  the browser: streamed review → numbered pins on the right shapes → click highlights; a 402
+  shows the upgrade dialog).
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -520,6 +605,28 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   - `shapeTypeLabel` moved from `PropertiesPanel` to `model/systemShapes.ts` (now shared by the
     findings panel).
 
+- **Phase 7 decisions (approved plan, "go with your recommendations"):**
+  - `entitlements` table now (no billing): a missing row is Free; plans are set by the
+    dev-only `plan:set` script until Phase 10. Limits live in code (`PLAN_LIMITS`).
+  - Anyone with read access (viewers included) may run a review; it uses the requester's
+    allowance and is visible to everyone who can open the board. Hints need edit access.
+  - Routes follow the existing style: `/boards/:id/reviews` (not `/api/...`).
+  - The board is read from Postgres, not from a live room or the request: correct on any
+    instance and can't be spoofed; the web app waits for "Saved" before starting.
+  - Structured outputs (`output_config.format`) instead of a forced tool call: no tools at
+    all (injection containment), and forced `tool_choice` conflicts with thinking.
+  - Findings are sent to the browser only after validation (progress events carry stages
+    and a token count, not partial findings).
+  - Quota is counted from `ai_usage` (outlives deleted boards, so deleting a board doesn't
+    refund reviews) plus live reservations. User-aborted reviews count; our failures don't.
+  - Pins are HTML buttons over the canvas (focusable and labelled), not Konva shapes.
+  - Hints trigger only on my own edits (other people's edits would spend my hourly
+    allowance), after 8 s of quiet, when the graph fingerprint changed.
+  - Cost is stored as integer micro-USD; prices are a table in code (`ai/pricing.ts`), and an
+    unknown model throws rather than silently bypassing the kill-switch.
+  - New dependency: `@anthropic-ai/sdk` 0.128.0 (server only). The board fixture builder
+    moved to `packages/graph/src/testing` (exported as `@whiteboard/graph/testing`) for the eval.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -609,9 +716,33 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   which can be a false positive when files are never served to users.
 - The highlight survives edits until re-check or close; highlighted shapes that were deleted
   are simply not drawn.
-- The design check has no server-side use yet (Phase 7 feeds it to the AI review).
+
+- **Phase 7:** the eval has **not been run yet** (needs `ANTHROPIC_API_KEY`; ~$1–3 per run),
+  so the ≥ 12/15 acceptance criterion is unverified. The prompt may need tuning after the
+  first run; record each run's score here.
+- The daily spend kill-switch is checked before each call: calls already in flight can
+  overshoot the limit by at most their own maximum cost (~$0.20 each).
+- The hint hourly cap is a count check without a lock: parallel hint requests from one user
+  can exceed it by one or two (hints cost ~$0.002).
+- Haiku 4.5 only caches prompts ≥ 4,096 tokens; the hint system prompt is shorter, so hints
+  aren't cached (not padded on purpose — hints are cheap).
+- Reviews read the stored board: an edit made in the last ~50 ms before "Start" (or while
+  offline) isn't included; the dialog waits for "Saved".
+- Hints are best effort: model errors return no hints silently (logged server-side).
+- Team review allowance is per seat, not yet pooled across an organization (Phase 10).
+- The "Upgrade" button is disabled ("coming soon") until billing exists (Phase 10).
 
 ## Later
+
+- Phase 9 (private rooms): AI review of an E2E-encrypted board needs explicit per-review
+  consent and must send only the extracted graph (SPEC §7); the review route reads the board
+  server-side today, which won't work for ciphertext.
+- Phase 10: pooled Team AI allowance; the upgrade dialog's button → checkout; plan changes
+  via billing webhooks (audited), not the dev script; ai_usage-based cost dashboard.
+- Phase 12: Sentry for AI failures (refusals, invalid output rate), PostHog events for review
+  started/completed/upgrade shown; alert when daily spend nears the limit.
+- Unscheduled: a "healthy design" eval board to measure false positives; run the eval in CI
+  on prompt changes (needs a budgeted key).
 
 - Phase 13: re-run the load tests against Render staging (2 instances + Key Value next to
   Supabase) and record connection setup / "Saved" latency; tune `DATABASE_POOL_MAX` to the
@@ -625,9 +756,8 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   after it.
 - Phase 10: retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
-- Phase 7: run the rules on the server over `doc.getMap("shapes").toJSON()` and send the graph +
-  rule findings to Claude as grounding; validate Claude's findings with `findingSchema`; live
-  rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside live AI hints.
+- Unscheduled: live rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside
+  live AI hints.
 - Unscheduled: an explicit `instances` field on service shapes in the properties panel;
   guessing kinds for plain shapes from labels ("Redis" rectangle → cache), probably via AI;
   per-board rule settings (disable a rule, `maxSyncDepth`).

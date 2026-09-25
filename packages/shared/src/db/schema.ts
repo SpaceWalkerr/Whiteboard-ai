@@ -4,6 +4,7 @@ import {
   boolean,
   customType,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -13,6 +14,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { authUsers } from "drizzle-orm/supabase";
+import { PLANS } from "../plans";
 
 /**
  * One row per Supabase Auth user. The id IS the auth user id, so deleting the auth user
@@ -287,3 +289,106 @@ export const auditLogs = pgTable(
 export type BoardRole = (typeof BOARD_ROLES)[number];
 export type ShareRole = (typeof SHARE_ROLES)[number];
 export type OrgRole = (typeof ORG_ROLES)[number];
+
+// ── Phase 7: plans and AI reviews ───────────────────────────────────────────────────────────
+
+export const planEnum = pgEnum("plan", PLANS);
+
+/**
+ * What each user may use. A missing row means the Free plan. Billing (Phase 10) will write
+ * `plan`; limits per plan live in code (`PLAN_LIMITS`), with an optional per-user override.
+ */
+export const entitlements = pgTable("entitlements", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => authUsers.id, { onDelete: "cascade" }),
+  plan: planEnum("plan").notNull().default("free"),
+  /** Replaces the plan's monthly AI review allowance when set (support, trials). */
+  aiReviewsPerMonthOverride: integer("ai_reviews_per_month_override"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}).enableRLS();
+
+export const REVIEW_STATUSES = ["running", "completed", "failed"] as const;
+export const reviewStatus = pgEnum("review_status", REVIEW_STATUSES);
+
+/**
+ * AI design reviews of a board. A `running` row is inserted before Claude is called: it
+ * reserves one review of the requester's monthly allowance, so parallel requests can't
+ * exceed it. Failed reviews don't count, except ones the user aborted after the call began.
+ */
+export const reviews = pgTable(
+  "reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    requestedBy: uuid("requested_by").references(() => authUsers.id, { onDelete: "set null" }),
+    status: reviewStatus("status").notNull().default("running"),
+    problemStatement: text("problem_statement").notNull().default(""),
+    requirements: text("requirements").notNull().default(""),
+    /** The extracted graph that was reviewed (what the finding shape ids refer to). */
+    graph: jsonb("graph").$type<unknown>().notNull(),
+    graphFormatVersion: integer("graph_format_version").notNull(),
+    /** Rule-engine findings given to the model as grounding. */
+    ruleFindings: jsonb("rule_findings").$type<unknown>().notNull().default([]),
+    /** The validated review (null until completed). */
+    result: jsonb("result").$type<unknown>(),
+    model: text("model").notNull(),
+    errorCode: text("error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("reviews_board_id_idx").on(t.boardId, t.createdAt),
+    index("reviews_requested_by_idx").on(t.requestedBy, t.createdAt),
+  ],
+).enableRLS();
+
+export const AI_CALL_KINDS = ["review", "hint"] as const;
+export const AI_CALL_STATUSES = [
+  "ok",
+  "error",
+  "refused",
+  "truncated",
+  "invalid_output",
+  "aborted",
+] as const;
+export type AiCallKind = (typeof AI_CALL_KINDS)[number];
+export type AiCallStatus = (typeof AI_CALL_STATUSES)[number];
+
+/**
+ * One row per Claude API call (successful or not): tokens and cost, for quotas, the daily
+ * spend kill-switch and cost reporting. No foreign keys on purpose: spend records must
+ * outlive the boards and users they mention.
+ */
+export const aiUsage = pgTable(
+  "ai_usage",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id"),
+    boardId: uuid("board_id"),
+    reviewId: uuid("review_id"),
+    kind: text("kind", { enum: AI_CALL_KINDS }).notNull(),
+    model: text("model").notNull(),
+    status: text("status", { enum: AI_CALL_STATUSES }).notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cacheCreationTokens: integer("cache_creation_tokens").notNull().default(0),
+    cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+    /** Cost in millionths of a US dollar (exact integer arithmetic). */
+    costUsdMicros: bigint("cost_usd_micros", { mode: "number" }).notNull().default(0),
+    latencyMs: integer("latency_ms").notNull().default(0),
+    /** Anthropic's request id, for support tickets. */
+    requestId: text("request_id"),
+    /** Graph fingerprint for hints (skips identical repeat requests). */
+    fingerprint: text("fingerprint"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_usage_created_at_idx").on(t.createdAt),
+    index("ai_usage_user_kind_idx").on(t.userId, t.kind, t.createdAt),
+  ],
+).enableRLS();
+
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];

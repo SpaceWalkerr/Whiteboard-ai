@@ -10,12 +10,16 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "load:seed": "tsx --env-file-if-exists=.env scripts/loadtest-seed.ts"
+    "load:seed": "tsx --env-file-if-exists=.env scripts/loadtest-seed.ts",
+    "plan:set": "tsx --env-file-if-exists=.env scripts/set-plan.ts",
+    "eval:review": "tsx --env-file-if-exists=.env eval/run.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.128.0",
     "@fastify/cors": "11.3.0",
     "@fastify/rate-limit": "11.2.0",
     "@react-email/components": "1.0.12",
+    "@whiteboard/graph": "workspace:*",
     "@whiteboard/shared": "workspace:*",
     "drizzle-orm": "catalog:",
     "fastify": "5.12.5",

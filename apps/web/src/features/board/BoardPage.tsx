@@ -1,11 +1,21 @@
-import { ArrowLeft, ClipboardCheck, Users } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, ClipboardCheck, Sparkles, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { Awareness } from "y-protocols/awareness";
 import { BoardHistory, BoardStore, type SystemShapeType } from "@whiteboard/shared/board";
 import type { BoardDetail, BoardRole } from "@whiteboard/shared/api";
+import {
+  hintsResponseSchema,
+  reviewListSchema,
+  reviewRecordSchema,
+  type Hint,
+  type ReviewFinding,
+  type ReviewRequest,
+} from "@whiteboard/graph";
 import type { DeniedReason, PresenceUser, TicketResult } from "@whiteboard/shared/sync";
 import { useAuth } from "@/auth/authContext";
+import type { ApiClient } from "@/lib/apiClient";
 import { shareTokenFor } from "@/auth/localData";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -33,6 +43,14 @@ import {
 import { BoardContextMenu } from "./ui/BoardContextMenu";
 import { ConnectionStatus, OfflineBanner } from "./ui/ConnectionStatus";
 import { FindingsPanel } from "./ui/FindingsPanel";
+import { HintCards } from "./ui/HintCards";
+import { ReviewDialog } from "./ui/ReviewDialog";
+import { ReviewPanel } from "./ui/ReviewPanel";
+import { ReviewPins } from "./ui/ReviewPins";
+import { UpgradeDialog } from "./ui/UpgradeDialog";
+import { HintsController } from "./review/HintsController";
+import { ReviewStore } from "./review/ReviewStore";
+import { AI_QUOTA_KEY, useAiQuota } from "./review/useAiQuota";
 import { PresenceAvatars } from "./ui/PresenceAvatars";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
 import { QuickInsertDialog } from "./ui/QuickInsertDialog";
@@ -58,6 +76,8 @@ interface BoardSession {
   peers: PeersStore;
   role: RoleStore;
   check: DesignCheckStore;
+  review: ReviewStore;
+  hints: HintsController;
 }
 
 /** Screen area the findings panel (w-80 + margins) covers on the right… */
@@ -65,7 +85,35 @@ const FINDINGS_INSETS = { ...PANEL_INSETS, right: 350 };
 /** …and with the properties panel (w-64) open beside it. */
 const FINDINGS_AND_PROPERTIES_INSETS = { ...PANEL_INSETS, right: 630 };
 
-function createSession(userId: string, role: BoardRole): BoardSession {
+/** This board's AI endpoints, with the share-link token when the board was opened by link. */
+function aiEndpoints(api: ApiClient, boardId: string, shareToken: string | undefined) {
+  const base = `/boards/${boardId}`;
+  return {
+    review: {
+      stream: (request: ReviewRequest, signal: AbortSignal) =>
+        api.stream(`${base}/reviews`, { body: request, shareToken, signal }),
+      list: async () =>
+        (await api.request(`${base}/reviews`, { schema: reviewListSchema, shareToken })).reviews,
+      get: (reviewId: string) =>
+        api.request(`${base}/reviews/${reviewId}`, { schema: reviewRecordSchema, shareToken }),
+    },
+    hints: {
+      fetch: () =>
+        api.request(`${base}/hints`, {
+          method: "POST",
+          body: {},
+          schema: hintsResponseSchema,
+          shareToken,
+        }),
+    },
+  };
+}
+
+function createSession(
+  userId: string,
+  role: BoardRole,
+  ai: ReturnType<typeof aiEndpoints>,
+): BoardSession {
   const store = new BoardStore({ userId });
   const history = new BoardHistory(store);
   const controller = new BoardController(store, history);
@@ -84,6 +132,8 @@ function createSession(userId: string, role: BoardRole): BoardSession {
     peers: new PeersStore(awareness),
     role: new RoleStore(role),
     check: new DesignCheckStore(store),
+    review: new ReviewStore(ai.review),
+    hints: new HintsController(store, ai.hints),
   };
 }
 
@@ -139,8 +189,10 @@ export function BoardPage({
   fetchTicket,
   onTitleChange,
 }: BoardPageProps) {
-  const [session] = useState(() => createSession(me.id, detail.role));
   const { api } = useAuth();
+  const [session] = useState(() =>
+    createSession(me.id, detail.role, aiEndpoints(api, boardId, shareTokenFor(boardId))),
+  );
   const getTicket = useCallback(async (): Promise<TicketResult> => {
     const result = await fetchTicket();
     if (!result.ok) return result;
@@ -175,7 +227,9 @@ export function BoardPage({
             peers: () => session.peers.get().map((p) => p.presence),
             me: () => me,
             designCheck: () => session.check.get().result,
-            designCheckFocus: () => session.check.get().focus?.shapeIds ?? null,
+            designCheckFocus: () =>
+              session.review.get().focus?.shapeIds ?? session.check.get().focus?.shapeIds ?? null,
+            aiReview: () => session.review.get().current,
           })
         : undefined,
     [session, debugTools, me],
@@ -226,37 +280,111 @@ function BoardView({
   const pointerWorld = useRef<{ x: number; y: number } | null>(null);
   const ui = useSyncExternalStore(controller.subscribeUi, controller.getUi);
   const checkState = useSyncExternalStore(session.check.subscribe, session.check.get);
+  const reviewState = useSyncExternalStore(session.review.subscribe, session.review.get);
+  const hintsNotice = useSyncExternalStore(session.hints.subscribe, session.hints.get).notice;
+  const { status: authStatus } = useAuth();
+  const signedIn = authStatus === "signedIn";
+  const queryClient = useQueryClient();
+  const quota = useAiQuota(signedIn);
+  const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
+  const [hintsWanted, setHintsWanted] = useState(readHintsPreference);
+  const hintsAvailable = signedIn && !readOnly && quota.data?.liveHints === true;
   const checkButtonRef = useRef<HTMLButtonElement>(null);
+  const reviewButtonRef = useRef<HTMLButtonElement>(null);
   const runCheck = useCallback(() => {
+    // One results panel at a time on the right.
+    session.review.close();
     session.check.run();
   }, [session]);
+  const openReview = useCallback(() => {
+    if (!signedIn) return;
+    session.check.close();
+    void session.review.open();
+  }, [session, signedIn]);
+  const closeReview = useCallback(() => {
+    session.review.close();
+    reviewButtonRef.current?.focus();
+  }, [session]);
+  const startReview = useCallback(
+    (request: ReviewRequest) => {
+      setReviewDialogOpen(false);
+      session.check.close();
+      void session.review.start(request);
+    },
+    [session],
+  );
+
+  // Refresh "N reviews left" after each completed review.
+  useEffect(() => {
+    if (reviewState.completions > 0) void queryClient.invalidateQueries({ queryKey: AI_QUOTA_KEY });
+  }, [reviewState.completions, queryClient]);
+
+  // Live hints run only for Pro+ editors who haven't switched them off.
+  useEffect(() => {
+    session.hints.setEnabled(hintsAvailable && hintsWanted);
+    return () => {
+      session.hints.setEnabled(false);
+    };
+  }, [session, hintsAvailable, hintsWanted]);
   const closeCheck = useCallback(() => {
     session.check.close();
     checkButtonRef.current?.focus();
   }, [session]);
-  const focusFinding = useCallback(
-    (focus: CheckFocus) => {
-      session.check.setFocus(focus);
+  const zoomTo = useCallback(
+    (shapeIds: readonly string[]) => {
       const propertiesOpen = !controller.readOnly && controller.getUi().selectedIds.size > 0;
+      const panelOpen = session.check.get().open || session.review.get().open;
       zoomToShapes(
         controller.store,
         viewport,
-        focus.shapeIds,
-        propertiesOpen ? FINDINGS_AND_PROPERTIES_INSETS : FINDINGS_INSETS,
+        shapeIds,
+        !panelOpen
+          ? PANEL_INSETS
+          : propertiesOpen
+            ? FINDINGS_AND_PROPERTIES_INSETS
+            : FINDINGS_INSETS,
       );
     },
     [session, controller, viewport],
   );
+  const focusFinding = useCallback(
+    (focus: CheckFocus) => {
+      session.check.setFocus(focus);
+      zoomTo(focus.shapeIds);
+    },
+    [session, zoomTo],
+  );
+  const focusReviewFinding = useCallback(
+    (finding: ReviewFinding) => {
+      session.review.setFocus({
+        findingId: finding.id,
+        shapeIds: finding.shapeIds,
+        tone: finding.severity,
+      });
+      zoomTo(finding.shapeIds);
+    },
+    [session, zoomTo],
+  );
+  const showHint = useCallback(
+    (hint: Hint) => {
+      session.review.setFocus({ findingId: hint.id, shapeIds: hint.shapeIds, tone: hint.severity });
+      zoomTo(hint.shapeIds);
+    },
+    [session, zoomTo],
+  );
+  const activeFocus = reviewState.focus ?? checkState.focus;
   const highlight = useMemo(
     () =>
-      checkState.focus
-        ? {
-            ids: checkState.focus.shapeIds,
-            color: SEVERITY_META[checkState.focus.tone].canvasColor,
-          }
+      activeFocus
+        ? { ids: activeFocus.shapeIds, color: SEVERITY_META[activeFocus.tone].canvasColor }
         : null,
-    [checkState.focus],
+    [activeFocus],
   );
+  const pinnedFindings =
+    reviewState.open && !reviewState.running
+      ? (reviewState.current?.review?.findings ?? null)
+      : null;
 
   const onSpaceChange = useCallback(
     (pressed: boolean) => {
@@ -299,6 +427,7 @@ function BoardView({
     onShowShortcuts: openShortcuts,
     onQuickInsert: openInsert,
     onCheckDesign: runCheck,
+    onAiReview: openReview,
     onSpaceChange,
     onEscape,
   });
@@ -357,6 +486,15 @@ function BoardView({
               remoteSelections={remoteSelections}
               highlight={highlight}
             >
+              {pinnedFindings && (
+                <ReviewPins
+                  findings={pinnedFindings}
+                  store={controller.store}
+                  viewport={viewport}
+                  activeId={reviewState.focus?.findingId ?? null}
+                  onSelect={focusReviewFinding}
+                />
+              )}
               <RemoteCursors peers={peers} viewport={viewport} />
               <TextEditor controller={controller} viewport={viewport} />
             </BoardCanvas>
@@ -398,6 +536,19 @@ function BoardView({
             <ClipboardCheck aria-hidden="true" />
             Check design
           </Button>
+          {signedIn && (
+            <Button
+              ref={reviewButtonRef}
+              size="sm"
+              variant="outline"
+              aria-keyshortcuts="Shift+R"
+              title="AI design review (⇧R)"
+              onClick={openReview}
+            >
+              <Sparkles aria-hidden="true" />
+              AI review
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => {
@@ -440,7 +591,12 @@ function BoardView({
           readOnly={readOnly}
         />
         {!readOnly && <ShapePalette controller={controller} />}
-        {!readOnly && <PropertiesPanel controller={controller} besidePanel={checkState.open} />}
+        {!readOnly && (
+          <PropertiesPanel
+            controller={controller}
+            besidePanel={checkState.open || reviewState.open}
+          />
+        )}
         {checkState.open && (
           <FindingsPanel
             check={session.check}
@@ -450,7 +606,57 @@ function BoardView({
             onFocus={focusFinding}
           />
         )}
+        {reviewState.open && (
+          <ReviewPanel
+            review={session.review}
+            store={controller.store}
+            onNewReview={() => {
+              setReviewDialogOpen(true);
+            }}
+            onClose={closeReview}
+            onFocusFinding={focusReviewFinding}
+            hints={
+              readOnly
+                ? null
+                : {
+                    available: hintsAvailable,
+                    enabled: hintsAvailable && hintsWanted,
+                    notice: hintsNotice,
+                    onToggle: (enabled) => {
+                      setHintsWanted(enabled);
+                      writeHintsPreference(enabled);
+                    },
+                    onUpgrade: () => {
+                      setUpgradeMessage("Live AI hints are included in the Pro and Team plans.");
+                    },
+                  }
+            }
+          />
+        )}
+        <HintCards hints={session.hints} store={controller.store} onShow={showHint} />
         <ZoomControls controller={controller} viewport={viewport} modKey={modKey} />
+        <ReviewDialog
+          open={reviewDialogOpen}
+          onOpenChange={setReviewDialogOpen}
+          initial={{
+            problemStatement: reviewState.current?.problemStatement ?? "",
+            requirements: reviewState.current?.requirements ?? "",
+          }}
+          saving={status.save === "saving"}
+          onStart={startReview}
+          onUpgrade={(message) => {
+            setReviewDialogOpen(false);
+            setUpgradeMessage(message);
+          }}
+        />
+        <UpgradeDialog
+          message={upgradeMessage ?? reviewState.upgrade?.message ?? null}
+          onOpenChange={(open) => {
+            if (open) return;
+            setUpgradeMessage(null);
+            session.review.dismissUpgrade();
+          }}
+        />
 
         <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} mac={mac} />
         <QuickInsertDialog
@@ -463,6 +669,25 @@ function BoardView({
       </div>
     </TooltipProvider>
   );
+}
+
+const HINTS_PREFERENCE_KEY = "wb:live-hints";
+
+/** Live hints default to on; the choice is remembered per browser. */
+function readHintsPreference(): boolean {
+  try {
+    return localStorage.getItem(HINTS_PREFERENCE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function writeHintsPreference(enabled: boolean): void {
+  try {
+    localStorage.setItem(HINTS_PREFERENCE_KEY, enabled ? "on" : "off");
+  } catch {
+    // Storage blocked: the choice lasts for this page only.
+  }
 }
 
 /** Screen-reader feedback for canvas selection, which is otherwise invisible to them. */

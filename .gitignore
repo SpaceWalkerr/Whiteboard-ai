@@ -23,3 +23,6 @@ blob-report/
 # Load-test seeds (contain room tickets) and results
 loadtest/.data/
 .scale-run/
+
+# AI review eval results (per run; the score is recorded in PROGRESS.md)
+apps/server/eval/results/
