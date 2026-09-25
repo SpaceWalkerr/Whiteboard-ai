@@ -2,22 +2,57 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
+import { TicketIssuer } from "../src/auth/tickets";
+import {
+  createAuthUser,
+  createOwnedBoard,
+  deleteAuthUsers,
+  TEST_ISSUER,
+  TEST_TICKET_SECRET,
+  type TestUser,
+} from "./authHelpers";
 import { connectTestDb } from "./pgHelpers";
 import { connectClient, ORIGIN, waitFor } from "./syncHelpers";
 
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
-const boardId = crypto.randomUUID();
-const gracefulBoardId = crypto.randomUUID();
 const children: ChildProcess[] = [];
+const tickets = new TicketIssuer(TEST_TICKET_SECRET);
+let owner: TestUser;
+let boardId: string;
+let gracefulBoardId: string;
+
+beforeAll(async () => {
+  const { db, sql } = await connectTestDb();
+  owner = await createAuthUser(sql, "Crash Owner");
+  boardId = await createOwnedBoard(db, owner);
+  gracefulBoardId = await createOwnedBoard(db, owner);
+  await sql.end({ timeout: 5 });
+});
 
 afterAll(async () => {
   for (const child of children) child.kill("SIGKILL");
-  const { cleanup, sql } = await connectTestDb();
-  await cleanup([boardId, gracefulBoardId]);
+  const { sql } = await connectTestDb();
+  await deleteAuthUsers(sql, [owner.id]);
   await sql.end({ timeout: 5 });
 });
+
+/** The spawned server shares the test's ticket secret, so we can mint the owner's tickets. */
+function ownerClient(wsUrl: string, board: string) {
+  return connectClient(wsUrl, board, {
+    getTicket: async () => {
+      const { ticket } = await tickets.issue({
+        userId: owner.id,
+        boardId: board,
+        role: "owner",
+        linkId: null,
+        viaPublic: false,
+      });
+      return { ok: true, ticket };
+    },
+  });
+}
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -45,6 +80,9 @@ async function startProcess(port: number, flushMs = 50): Promise<ChildProcess> {
       DATABASE_URL: process.env.DATABASE_URL,
       CORS_ALLOWED_ORIGINS: ORIGIN,
       SYNC_FLUSH_MS: String(flushMs),
+      SUPABASE_URL: TEST_ISSUER.replace("/auth/v1", ""),
+      ROOM_TICKET_SECRET: TEST_TICKET_SECRET,
+      APP_URL: "http://app.test",
     },
     stdio: "ignore",
   });
@@ -71,7 +109,7 @@ describe("crash safety", () => {
     const first = await startProcess(port);
     const wsUrl = `ws://127.0.0.1:${port}`;
 
-    const writer = connectClient(wsUrl, boardId);
+    const writer = ownerClient(wsUrl, boardId);
     await waitFor(() => writer.provider.getStatus() === "connected", 10_000);
     const shapes = writer.doc.getMap<Y.Map<unknown>>("shapes");
 
@@ -97,7 +135,7 @@ describe("crash safety", () => {
     writer.provider.destroy();
 
     await startProcess(port);
-    const reader = connectClient(wsUrl, boardId);
+    const reader = ownerClient(wsUrl, boardId);
     await waitFor(() => reader.provider.getStatus() === "connected", 10_000);
     await waitFor(() => acknowledged.every((id) => reader.doc.getMap("shapes").has(id)), 30_000);
     const recovered = shapeIds(reader.doc);
@@ -113,7 +151,7 @@ describe("crash safety", () => {
     // A long batching window: the edits are still unsaved when SIGTERM arrives.
     const server = await startProcess(port, 1_000);
     const wsUrl = `ws://127.0.0.1:${port}`;
-    const writer = connectClient(wsUrl, gracefulBoardId);
+    const writer = ownerClient(wsUrl, gracefulBoardId);
     await waitFor(() => writer.provider.getStatus() === "connected", 10_000);
     const shapes = writer.doc.getMap<Y.Map<unknown>>("shapes");
     for (let i = 0; i < 50; i++) shapes.set(`pending-${i}`, new Y.Map<unknown>());
@@ -133,7 +171,7 @@ describe("crash safety", () => {
     writer.provider.destroy();
 
     await startProcess(port);
-    const reader = connectClient(wsUrl, gracefulBoardId);
+    const reader = ownerClient(wsUrl, gracefulBoardId);
     await waitFor(() => reader.doc.getMap("shapes").size === 50, 30_000);
     reader.provider.destroy();
   });

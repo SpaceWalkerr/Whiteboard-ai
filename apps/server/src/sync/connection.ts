@@ -13,6 +13,7 @@ import {
   readAwarenessEntries,
   toUint8Array,
 } from "@whiteboard/shared/sync";
+import { can } from "../access/boardAccess";
 import type { ConnectionIdentity } from "./auth";
 import type { SyncMetrics } from "./metrics";
 import type { TokenBucket } from "./rateLimit";
@@ -185,8 +186,12 @@ export class SyncConnection implements RoomMember {
         this.options.metrics.messages.inc({
           type: syncType === syncProtocol.messageYjsUpdate ? "update" : "sync_step2",
         });
-        // Viewers may read but never write (role enforced from Phase 4).
-        if (this.identity.role !== "editor") return;
+        // Viewers may read but never write. Their writes are dropped server-side, whatever
+        // the client sends; the same permission table as the REST API decides.
+        if (!can(this.identity.role, "write")) {
+          this.options.metrics.messages.inc({ type: "write_denied" });
+          return;
+        }
         this.options.metrics.updateBytes.inc(bytes);
         syncProtocol.readSyncStep2(decoder, this.room.doc, this, (error) => {
           throw error;

@@ -78,6 +78,23 @@ export const serverEnvSchema = z
     /** Fold a board's update log into a snapshot after this many updates. */
     SNAPSHOT_EVERY_UPDATES: z.coerce.number().int().min(10).max(100_000).default(500),
 
+    /** Supabase project URL; the JWKS used to verify access tokens is derived from it. */
+    SUPABASE_URL: z.url().transform((value) => value.replace(/\/$/, "")),
+    /** Service-role key: Storage access (thumbnails). Server-only. Required in production. */
+    SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
+    /** HMAC secret for 5-minute WebSocket room tickets (at least 32 characters). */
+    ROOM_TICKET_SECRET: z.string().min(32, { message: "must be at least 32 characters" }),
+    /** Public URL of the web app, for links in emails. */
+    APP_URL: z.url().transform((value) => value.replace(/\/$/, "")),
+    /** "log" prints emails to the server log (development); "resend" sends them. */
+    EMAIL_TRANSPORT: z.enum(["log", "resend"]).default("log"),
+    RESEND_API_KEY: z.string().min(10).optional(),
+    EMAIL_FROM: z.string().min(3).optional(),
+    /** Bearer secret for internal cron endpoints (trash purge). Required in production. */
+    CRON_SECRET: z.string().min(32, { message: "must be at least 32 characters" }).optional(),
+    /** Trust X-Forwarded-For from this many proxy hops (1 on Render) so rate limits see real IPs. */
+    TRUST_PROXY: z.coerce.number().int().min(0).max(5).default(0),
+
     /** Bearer token for GET /metrics. Optional in development, required in production. */
     METRICS_TOKEN: z.string().min(32, { message: "must be at least 32 characters" }).optional(),
 
@@ -85,16 +102,24 @@ export const serverEnvSchema = z
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(290_000).default(25_000),
   })
   .superRefine((env, ctx) => {
-    if (env.NODE_ENV === "production" && env.REDIS_URL === undefined) {
-      ctx.addIssue({ code: "custom", path: ["REDIS_URL"], message: "is required in production" });
-    }
-    if (env.NODE_ENV === "production" && env.METRICS_TOKEN === undefined) {
+    const require = (key: keyof typeof env, when: boolean, message: string) => {
+      if (when && env[key] === undefined) ctx.addIssue({ code: "custom", path: [key], message });
+    };
+    const production = env.NODE_ENV === "production";
+    require("REDIS_URL", production, "is required in production");
+    require("METRICS_TOKEN", production, "is required in production");
+    require("SUPABASE_SERVICE_ROLE_KEY", production, "is required in production");
+    require("CRON_SECRET", production, "is required in production");
+    if (production && env.EMAIL_TRANSPORT !== "resend") {
       ctx.addIssue({
         code: "custom",
-        path: ["METRICS_TOKEN"],
-        message: "is required in production",
+        path: ["EMAIL_TRANSPORT"],
+        message: 'must be "resend" in production',
       });
     }
+    const resend = env.EMAIL_TRANSPORT === "resend";
+    require("RESEND_API_KEY", resend, "is required when EMAIL_TRANSPORT=resend");
+    require("EMAIL_FROM", resend, "is required when EMAIL_TRANSPORT=resend");
   });
 
 export type ServerEnv = z.output<typeof serverEnvSchema>;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { BoardStore, BoardValidationError } from "../../src/board";
+import { BoardReadOnlyError, BoardStore, BoardValidationError } from "../../src/board";
 import { arrow, database, ids, rect } from "./fixtures";
 
 function createStore() {
@@ -141,5 +141,29 @@ describe("BoardStore", () => {
     Y.applyUpdate(copy, Y.encodeStateAsUpdate(source.doc));
 
     expect(new BoardStore({ doc: copy }).getShape(shape.id)).toMatchObject({ id: shape.id });
+  });
+});
+
+describe("BoardStore view-only mode", () => {
+  it("refuses local writes but still receives remote changes", () => {
+    const store = new BoardStore();
+    const shape = rect();
+    store.createShape(shape);
+    store.readOnly = true;
+    expect(() => {
+      store.updateShape(shape.id, { x: 5 });
+    }).toThrow(BoardReadOnlyError);
+    expect(() => {
+      store.createShape(rect());
+    }).toThrow(BoardReadOnlyError);
+    expect(() => {
+      store.deleteShapes([shape.id]);
+    }).toThrow(BoardReadOnlyError);
+
+    const remote = new BoardStore();
+    Y.applyUpdate(remote.doc, Y.encodeStateAsUpdate(store.doc));
+    remote.updateShape(shape.id, { x: 99 });
+    Y.applyUpdate(store.doc, Y.encodeStateAsUpdate(remote.doc), "remote");
+    expect(store.getShape(shape.id)?.x).toBe(99);
   });
 });

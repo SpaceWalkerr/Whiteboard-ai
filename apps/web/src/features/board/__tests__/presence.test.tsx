@@ -1,10 +1,10 @@
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Awareness } from "y-protocols/awareness";
 import { BoardStore } from "@whiteboard/shared/board";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { loadGuest, PRESENCE_COLORS, randomGuest } from "../sync/guestIdentity";
+import { colorFor, presenceUserFor, PRESENCE_COLORS } from "../sync/identity";
 import { PeersStore, throttle } from "../sync/stores";
 import { ConnectionStatus, OfflineBanner } from "../ui/ConnectionStatus";
 import { PresenceAvatars } from "../ui/PresenceAvatars";
@@ -13,25 +13,24 @@ const me = { id: "guest-me", name: "Quiet Gecko", color: "#1d4ed8" };
 const other = { id: "guest-2", name: "Brave Otter", color: "#b91c1c" };
 const presence = (user: typeof me) => ({ user, cursor: null, selection: [], viewport: null });
 
-describe("guest identity", () => {
-  beforeEach(() => {
-    localStorage.clear();
+describe("presence identity", () => {
+  const profile = {
+    id: "5b3c1a52-6d1e-4d6f-9b43-4c7e9e2a1f00",
+    email: "ada@example.com",
+    displayName: "Ada Lovelace",
+    avatarUrl: null,
+  };
+
+  it("uses the signed-in profile with a stable colour", () => {
+    const user = presenceUserFor(profile, "guest-x");
+    expect(user).toMatchObject({ id: profile.id, name: "Ada Lovelace" });
+    expect(PRESENCE_COLORS).toContain(user.color);
+    expect(presenceUserFor(profile, "guest-y").color).toBe(user.color);
+    expect(colorFor(profile.id)).toBe(user.color);
   });
 
-  it("creates a named, coloured guest once and keeps it for this browser", () => {
-    const first = loadGuest();
-    expect(first.id).toMatch(/^guest-/);
-    expect(PRESENCE_COLORS).toContain(first.color);
-    expect(loadGuest()).toEqual(first);
-  });
-
-  it("replaces corrupted stored identities", () => {
-    localStorage.setItem("whiteboard.guest", JSON.stringify({ id: "x", name: "", color: "red" }));
-    expect(loadGuest().name).not.toBe("");
-  });
-
-  it("generates readable names", () => {
-    expect(randomGuest(() => 0).name).toBe("Brave Otter");
+  it("shows anonymous visitors of public boards as Guest", () => {
+    expect(presenceUserFor(null, "guest-123")).toMatchObject({ id: "guest-123", name: "Guest" });
   });
 });
 
@@ -80,33 +79,38 @@ describe("PeersStore", () => {
 describe("presence UI", () => {
   it("announces the connection status in words", () => {
     const { rerender } = render(
-      <ConnectionStatus state={{ connection: "connected", save: "saved" }} />,
+      <ConnectionStatus state={{ connection: "connected", save: "saved", denied: null }} />,
     );
     expect(screen.getByRole("status")).toHaveTextContent("Saved");
-    rerender(<ConnectionStatus state={{ connection: "connected", save: "saving" }} />);
+    rerender(
+      <ConnectionStatus state={{ connection: "connected", save: "saving", denied: null }} />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");
-    rerender(<ConnectionStatus state={{ connection: "reconnecting", save: "saving" }} />);
+    rerender(
+      <ConnectionStatus state={{ connection: "reconnecting", save: "saving", denied: null }} />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Reconnecting…");
   });
 
   it("shows the offline banner only when edits can't reach the server", () => {
     const { rerender } = render(
-      <OfflineBanner state={{ connection: "connected", save: "saving" }} />,
+      <OfflineBanner state={{ connection: "connected", save: "saving", denied: null }} />,
     );
     expect(screen.queryByRole("alert")).toBeNull();
-    rerender(<OfflineBanner state={{ connection: "offline", save: "saved" }} />);
+    rerender(<OfflineBanner state={{ connection: "offline", save: "saved", denied: null }} />);
     expect(screen.getByRole("alert")).toHaveTextContent(
       "You're offline — changes are saved on this device",
     );
-    rerender(<OfflineBanner state={{ connection: "reconnecting", save: "saving" }} />);
+    rerender(
+      <OfflineBanner state={{ connection: "reconnecting", save: "saving", denied: null }} />,
+    );
     expect(screen.getByRole("alert")).toHaveTextContent("Connection lost");
-    rerender(<OfflineBanner state={{ connection: "reconnecting", save: "saved" }} />);
+    rerender(<OfflineBanner state={{ connection: "reconnecting", save: "saved", denied: null }} />);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("follows someone when their avatar is clicked, and lets me rename myself", async () => {
+  it("follows someone when their avatar is clicked (one avatar per person)", async () => {
     const onFollow = vi.fn();
-    const onRename = vi.fn();
     render(
       <TooltipProvider>
         <PresenceAvatars
@@ -118,19 +122,11 @@ describe("presence UI", () => {
           ]}
           followingClientId={null}
           onFollow={onFollow}
-          onRename={onRename}
         />
       </TooltipProvider>,
     );
     expect(screen.getAllByRole("button", { name: /Follow Brave Otter/ })).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: "Follow Brave Otter" }));
     expect(onFollow).toHaveBeenCalledWith(7);
-
-    await userEvent.click(screen.getByRole("button", { name: /You: Quiet Gecko/ }));
-    const input = screen.getByLabelText("Name");
-    await userEvent.clear(input);
-    await userEvent.type(input, "Ada{Enter}");
-    act(() => undefined);
-    expect(onRename).toHaveBeenCalledWith("Ada");
   });
 });

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { deleteE2EUsers } from "./auth";
 import { openBoard } from "./helpers";
 
 interface FrameStats {
@@ -51,6 +52,10 @@ async function measurePan(page: Page, durationMs: number): Promise<FrameStats> {
     frames: frames.length,
   };
 }
+
+test.afterAll(async () => {
+  await deleteE2EUsers();
+});
 
 test("a 2,000-shape board pans smoothly", async ({ page }) => {
   await openBoard(page);

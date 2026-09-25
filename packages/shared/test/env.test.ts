@@ -7,6 +7,9 @@ const validServerEnv = {
   DATABASE_URL: "postgresql://postgres:s3cret-password@127.0.0.1:54322/postgres",
   REDIS_URL: "redis://127.0.0.1:6379",
   CORS_ALLOWED_ORIGINS: "http://localhost:5173, https://app.example.com/",
+  SUPABASE_URL: "https://project.supabase.co",
+  ROOM_TICKET_SECRET: "t".repeat(32),
+  APP_URL: "http://localhost:5173",
 };
 
 function captureError(fn: () => unknown): EnvValidationError {
@@ -31,8 +34,11 @@ describe("loadEnv(serverEnvSchema)", () => {
   it("names every missing required variable", () => {
     const error = captureError(() => loadEnv(serverEnvSchema, {}));
     expect(error.issues.map((i) => i.variable).sort()).toEqual([
+      "APP_URL",
       "CORS_ALLOWED_ORIGINS",
       "DATABASE_URL",
+      "ROOM_TICKET_SECRET",
+      "SUPABASE_URL",
     ]);
     expect(error.message).toContain("DATABASE_URL: is required");
   });
@@ -50,26 +56,47 @@ describe("loadEnv(serverEnvSchema)", () => {
     ).toBeUndefined();
   });
 
-  it("requires Redis in production", () => {
-    const error = captureError(() =>
-      loadEnv(serverEnvSchema, {
-        ...validServerEnv,
-        REDIS_URL: "",
-        NODE_ENV: "production",
-        METRICS_TOKEN: "m".repeat(32),
-      }),
-    );
-    expect(error.issues).toEqual([{ variable: "REDIS_URL", problem: "is required in production" }]);
+  const productionEnv = {
+    ...validServerEnv,
+    NODE_ENV: "production",
+    REDIS_URL: "redis://127.0.0.1:6379",
+    METRICS_TOKEN: "m".repeat(32),
+    SUPABASE_SERVICE_ROLE_KEY: "service-role-key-0123456789",
+    CRON_SECRET: "c".repeat(32),
+    EMAIL_TRANSPORT: "resend",
+    RESEND_API_KEY: "re_0123456789",
+    EMAIL_FROM: "Whiteboard <no-reply@example.com>",
+  };
+
+  it("accepts a complete production environment", () => {
+    expect(loadEnv(serverEnvSchema, productionEnv).NODE_ENV).toBe("production");
   });
 
-  it("requires a strong metrics token in production only", () => {
-    expect(loadEnv(serverEnvSchema, validServerEnv).METRICS_TOKEN).toBeUndefined();
-    const missing = captureError(() =>
-      loadEnv(serverEnvSchema, { ...validServerEnv, NODE_ENV: "production" }),
+  it.each([
+    ["REDIS_URL", "is required in production"],
+    ["METRICS_TOKEN", "is required in production"],
+    ["SUPABASE_SERVICE_ROLE_KEY", "is required in production"],
+    ["CRON_SECRET", "is required in production"],
+    ["RESEND_API_KEY", "is required when EMAIL_TRANSPORT=resend"],
+    ["EMAIL_FROM", "is required when EMAIL_TRANSPORT=resend"],
+  ])("requires %s in production", (variable, problem) => {
+    const error = captureError(() =>
+      loadEnv(serverEnvSchema, { ...productionEnv, [variable]: "" }),
     );
-    expect(missing.issues).toEqual([
-      { variable: "METRICS_TOKEN", problem: "is required in production" },
+    expect(error.issues).toEqual([{ variable, problem }]);
+  });
+
+  it("refuses the log email transport in production", () => {
+    const error = captureError(() =>
+      loadEnv(serverEnvSchema, { ...productionEnv, EMAIL_TRANSPORT: "log" }),
+    );
+    expect(error.issues).toEqual([
+      { variable: "EMAIL_TRANSPORT", problem: 'must be "resend" in production' },
     ]);
+  });
+
+  it("keeps production-only settings optional in development", () => {
+    expect(loadEnv(serverEnvSchema, validServerEnv).METRICS_TOKEN).toBeUndefined();
     const short = captureError(() =>
       loadEnv(serverEnvSchema, { ...validServerEnv, METRICS_TOKEN: "short" }),
     );
@@ -112,9 +139,17 @@ describe("loadEnv(serverEnvSchema)", () => {
   });
 });
 
+const webBase = {
+  VITE_API_URL: "http://localhost:4000",
+  VITE_WS_URL: "ws://localhost:4000",
+  VITE_SUPABASE_URL: "https://project.supabase.co",
+  VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_0123456789abcdef",
+};
+
 describe("loadEnv(webEnvSchema)", () => {
   it("strips a trailing slash from the API and WebSocket URLs", () => {
     const env = loadEnv(webEnvSchema, {
+      ...webBase,
       VITE_API_URL: "http://localhost:4000/",
       VITE_WS_URL: "ws://localhost:4000/",
     });
@@ -125,6 +160,7 @@ describe("loadEnv(webEnvSchema)", () => {
   it("requires a ws:// or wss:// sync URL", () => {
     const error = captureError(() =>
       loadEnv(webEnvSchema, {
+        ...webBase,
         VITE_API_URL: "http://localhost:4000",
         VITE_WS_URL: "http://localhost:4000",
       }),
@@ -135,18 +171,19 @@ describe("loadEnv(webEnvSchema)", () => {
   });
 
   it("keeps debug tools off unless explicitly enabled", () => {
-    const base = { VITE_API_URL: "http://localhost:4000", VITE_WS_URL: "ws://localhost:4000" };
-    expect(loadEnv(webEnvSchema, base).VITE_DEBUG_TOOLS).toBe(false);
-    expect(loadEnv(webEnvSchema, { ...base, VITE_DEBUG_TOOLS: "true" }).VITE_DEBUG_TOOLS).toBe(
+    expect(loadEnv(webEnvSchema, webBase).VITE_DEBUG_TOOLS).toBe(false);
+    expect(loadEnv(webEnvSchema, { ...webBase, VITE_DEBUG_TOOLS: "true" }).VITE_DEBUG_TOOLS).toBe(
       true,
     );
   });
 
-  it("fails when VITE_API_URL is missing", () => {
+  it("names every missing public variable", () => {
     const error = captureError(() => loadEnv(webEnvSchema, { MODE: "production" }));
-    expect(error.issues).toEqual([
-      { variable: "VITE_API_URL", problem: "is required" },
-      { variable: "VITE_WS_URL", problem: "is required" },
+    expect(error.issues.map((i) => i.variable)).toEqual([
+      "VITE_API_URL",
+      "VITE_WS_URL",
+      "VITE_SUPABASE_URL",
+      "VITE_SUPABASE_PUBLISHABLE_KEY",
     ]);
   });
 });

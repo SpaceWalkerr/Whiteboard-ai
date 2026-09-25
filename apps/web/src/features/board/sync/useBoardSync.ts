@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { Awareness } from "y-protocols/awareness";
-import { SyncProvider, type Presence, type PresenceUser } from "@whiteboard/shared/sync";
+import {
+  SyncProvider,
+  type Presence,
+  type PresenceUser,
+  type TicketResult,
+} from "@whiteboard/shared/sync";
 import type { BoardController } from "../controller";
 import type { Point } from "../geometry/bounds";
 import type { ViewportStore } from "../viewport/viewportStore";
@@ -20,8 +25,9 @@ export function useSyncConnection(options: {
   controller: BoardController;
   awareness: Awareness;
   status: StatusStore;
+  getTicket: () => Promise<TicketResult>;
 }): void {
-  const { serverUrl, boardId, controller, awareness, status } = options;
+  const { serverUrl, boardId, controller, awareness, status, getTicket } = options;
   useEffect(() => {
     const provider = new SyncProvider({
       serverUrl,
@@ -29,10 +35,15 @@ export function useSyncConnection(options: {
       doc: controller.store.doc,
       awareness,
       network: browserNetworkSignal(),
+      getTicket,
       scheduleFlush: (flush) => requestAnimationFrame(flush),
     });
     const publish = () => {
-      status.set({ connection: provider.getStatus(), save: provider.getSaveState() });
+      status.set({
+        connection: provider.getStatus(),
+        save: provider.getSaveState(),
+        denied: provider.getDeniedReason(),
+      });
     };
     publish();
     const unsubscribe = provider.subscribe(publish);
@@ -40,7 +51,7 @@ export function useSyncConnection(options: {
       unsubscribe();
       provider.destroy();
     };
-  }, [serverUrl, boardId, controller, awareness, status]);
+  }, [serverUrl, boardId, controller, awareness, status, getTicket]);
 }
 
 /**

@@ -16,6 +16,13 @@ export const MESSAGE_AWARENESS = 1;
 export const MESSAGE_PERSISTED = 2;
 
 /**
+ * WebSocket subprotocol. The room ticket travels as a second offered subprotocol
+ * ("ticket.<jwt>") so it never appears in URLs (which end up in logs).
+ */
+export const SYNC_SUBPROTOCOL = "whiteboard.v1";
+export const TICKET_PROTOCOL_PREFIX = "ticket.";
+
+/**
  * Largest message a client may send. Everyday updates are tiny, but a reconnecting client
  * sends its whole document in one sync step (a 2,000-shape board with history measured
  * ~1.9 MB), so 1 MB would lock large boards out. Abuse is bounded by the per-connection
@@ -41,6 +48,8 @@ export const CLOSE_CODES = {
   internalError: 1011,
   /** The board was deleted. Do not reconnect. */
   boardDeleted: 4404,
+  /** The user's access changed (removed, role changed, link revoked): fetch a new ticket. */
+  accessChanged: 4403,
 } as const;
 
 /** Board ids are UUIDs (the database key); they also travel in the URL path. */

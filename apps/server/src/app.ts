@@ -6,6 +6,9 @@ import type { Logger } from "pino";
 import type { HealthResponse } from "@whiteboard/shared/schemas";
 import { AppError, type ErrorBody } from "./errors";
 import { runReadinessChecks, type DependencyCheck } from "./http/readiness";
+import { registerApi, registerInternalRoutes } from "./api";
+import type { ApiDeps } from "./api/deps";
+import { registerRequestAuth } from "./auth/requestAuth";
 
 export interface AppOptions {
   logger: Logger;
@@ -15,11 +18,21 @@ export interface AppOptions {
   readinessTimeoutMs?: number;
   /** Prometheus registry served at /metrics; `token` (when set) is required as a bearer token. */
   metrics?: { registry: Registry; token: string | undefined };
+  /** The authenticated REST API (omitted in tests that only exercise health and sync). */
+  api?: ApiDeps | undefined;
+  /** Trust X-Forwarded-For from this many proxy hops (the load balancer on Render). */
+  trustProxy?: number | undefined;
 }
 
 export function buildApp(options: AppOptions) {
   const app = Fastify({
     loggerInstance: options.logger,
+    // Trust only the configured number of proxy hops (Render's load balancer), so clients
+    // can't spoof their IP for rate limiting via X-Forwarded-For.
+    trustProxy:
+      (options.trustProxy ?? 0) > 0
+        ? (_address: string, hop: number) => hop < (options.trustProxy ?? 0)
+        : false,
     genReqId: () => randomUUID(),
     logController: new LogController({
       // Health probes hit these every few seconds; logging them would drown real traffic.
@@ -35,7 +48,7 @@ export function buildApp(options: AppOptions) {
       callback(null, origin === undefined || options.isAllowedOrigin(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    allowedHeaders: ["Authorization", "Content-Type", "X-Share-Token"],
     credentials: false,
     maxAge: 600,
   });
@@ -74,6 +87,21 @@ export function buildApp(options: AppOptions) {
     }
     return reply.status(body.status === "ready" ? 200 : 503).send(body);
   });
+
+  const api = options.api;
+  if (api) {
+    // The API lives in its own scope: session verification (request.user) and rate limits
+    // apply to API routes only, never to health checks or metrics.
+    void app.register(async (scope) => {
+      registerRequestAuth(scope, api.verifier);
+      await registerApi(scope, api);
+    });
+    // Scheduled-job endpoints: CRON_SECRET only, no user session.
+    void app.register(async (scope) => {
+      registerInternalRoutes(scope, api);
+      await Promise.resolve();
+    });
+  }
 
   const metrics = options.metrics;
   if (metrics) {

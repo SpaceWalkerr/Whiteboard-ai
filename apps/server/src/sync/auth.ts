@@ -1,11 +1,14 @@
 import type { IncomingMessage } from "node:http";
-
-export type BoardRole = "viewer" | "editor";
+import type { BoardRole } from "@whiteboard/shared/api";
 
 export interface ConnectionIdentity {
-  /** Authenticated user id; null until Phase 4 adds sign-in. */
+  /** Authenticated user id; null for anonymous viewers of public boards (and in tests). */
   userId: string | null;
   role: BoardRole;
+  /** Share link the access came from (revoking it ends the session). */
+  linkId: string | null;
+  /** Access only because the board is public (turning that off ends the session). */
+  viaPublic: boolean;
 }
 
 export type AuthorizationResult =
@@ -13,17 +16,17 @@ export type AuthorizationResult =
 
 /**
  * Decides whether a WebSocket upgrade for `boardId` may proceed, and with which role. Runs
- * before the socket is accepted. Phase 4 replaces the implementation with
- * verifyToken(boardId, token) → role; nothing else in the sync module needs to change.
+ * before the socket is accepted. Production uses `ticketAuthorizer` (room ticket + database
+ * re-check).
  */
 export type AuthorizeConnection = (
   request: IncomingMessage,
   boardId: string,
 ) => Promise<AuthorizationResult>;
 
-/**
- * TEMPORARY (Phase 2 only): every connection is an anonymous editor. Boards are only reachable
- * by their unguessable id until real authentication lands in Phase 4.
- */
+/** Test helper only: every connection is an anonymous editor. Never used by the server. */
 export const allowAllConnections: AuthorizeConnection = () =>
-  Promise.resolve({ ok: true, identity: { userId: null, role: "editor" } });
+  Promise.resolve({
+    ok: true,
+    identity: { userId: null, role: "editor", linkId: null, viaPublic: false },
+  });

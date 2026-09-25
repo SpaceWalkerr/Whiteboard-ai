@@ -10,13 +10,15 @@ function label({ connection, save }: SyncState): string {
       return "Reconnecting…";
     case "offline":
       return "Offline";
+    case "denied":
+      return "No access";
     case "connected":
       return save === "saved" ? "Saved" : "Saving…";
   }
 }
 
 function dot({ connection, save }: SyncState): string {
-  if (connection === "offline") return "bg-destructive";
+  if (connection === "offline" || connection === "denied") return "bg-destructive";
   if (connection === "connected") return save === "saved" ? "bg-success" : "bg-amber-500";
   return "bg-amber-500 animate-pulse";
 }

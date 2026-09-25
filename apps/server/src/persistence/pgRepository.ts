@@ -12,12 +12,13 @@ import {
   sql,
   type Database,
 } from "@whiteboard/shared/db";
-import type {
-  BoardRepository,
-  BuildSnapshot,
-  CompactionResult,
-  LoadedBoard,
-  StoredUpdate,
+import {
+  BoardMissingError,
+  type BoardRepository,
+  type BuildSnapshot,
+  type CompactionResult,
+  type LoadedBoard,
+  type StoredUpdate,
 } from "./repository";
 
 export class PgBoardRepository implements BoardRepository {
@@ -60,10 +61,13 @@ export class PgBoardRepository implements BoardRepository {
   async append(boardId: string, updates: readonly StoredUpdate[]): Promise<void> {
     if (updates.length === 0) return;
     await this.db.transaction(async (tx) => {
-      await tx
-        .insert(boards)
-        .values({ id: boardId })
-        .onConflictDoUpdate({ target: boards.id, set: { updatedAt: sql`now()` } });
+      // Boards are created through the API (with an owner); persistence never creates one.
+      const touched = await tx
+        .update(boards)
+        .set({ updatedAt: sql`now()` })
+        .where(eq(boards.id, boardId))
+        .returning({ id: boards.id });
+      if (touched.length === 0) throw new BoardMissingError(boardId);
       await tx.insert(boardUpdates).values(updates.map((u) => ({ boardId, ...u })));
     });
   }

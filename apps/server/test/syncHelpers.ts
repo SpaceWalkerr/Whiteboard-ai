@@ -2,7 +2,12 @@ import type { AddressInfo } from "node:net";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import { WebSocket } from "ws";
-import { SyncProvider, type SyncStatus, type WebSocketLike } from "@whiteboard/shared/sync";
+import {
+  SyncProvider,
+  type SyncProviderOptions,
+  type SyncStatus,
+  type WebSocketLike,
+} from "@whiteboard/shared/sync";
 import type { App } from "../src/app";
 import { allowAllConnections, type AuthorizeConnection } from "../src/sync/auth";
 import { createSyncMetrics, type SyncMetrics } from "../src/sync/metrics";
@@ -80,7 +85,11 @@ export interface TestClient {
 }
 
 /** A real SyncProvider (the same class the browser uses) over the `ws` client. */
-export function connectClient(wsUrl: string, boardId: string): TestClient {
+export function connectClient(
+  wsUrl: string,
+  boardId: string,
+  options: { getTicket?: SyncProviderOptions["getTicket"] } = {},
+): TestClient {
   const doc = new Y.Doc();
   const awareness = new Awareness(doc);
   const provider = new SyncProvider({
@@ -88,8 +97,9 @@ export function connectClient(wsUrl: string, boardId: string): TestClient {
     boardId,
     doc,
     awareness,
-    createSocket: (url) => {
-      const ws = new WebSocket(url, { origin: ORIGIN });
+    ...(options.getTicket ? { getTicket: options.getTicket } : {}),
+    createSocket: (url, protocols) => {
+      const ws = new WebSocket(url, protocols, { origin: ORIGIN });
       // Node's `ws` emits an error when closed mid-handshake; browsers don't. The provider
       // handles reconnects via onclose, so the event itself needs no handling.
       ws.on("error", () => undefined);

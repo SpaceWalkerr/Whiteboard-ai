@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { BoardValidationError } from "./errors";
+import { BoardReadOnlyError, BoardValidationError } from "./errors";
 import { shapeSchema, type Shape, type ShapePatch, type ShapeStyle } from "./shapes";
 import { compareOrder, keyAbove, reorderKeys, type ReorderMode } from "./zorder";
 
@@ -79,9 +79,20 @@ export class BoardStore {
     return this.shapes.get(id);
   }
 
+  /**
+   * View-only mode (viewers). Local writes throw; remote changes still arrive. The server drops
+   * a viewer's writes anyway — this keeps their local copy from ever diverging from it.
+   */
+  readOnly = false;
+
   /** Runs several changes as one Yjs transaction (one update, one undo step). */
   transact(fn: () => void): void {
+    this.assertWritable();
     this.doc.transact(fn, this.localOrigin);
+  }
+
+  private assertWritable(): void {
+    if (this.readOnly) throw new BoardReadOnlyError();
   }
 
   /** Key that places a new shape above everything currently on the board. */
@@ -90,6 +101,7 @@ export class BoardStore {
   }
 
   createShapes(shapes: readonly Shape[]): void {
+    this.assertWritable();
     const validated = shapes.map((shape) => this.validate({ ...shape, updatedAt: this.now() }));
     this.transact(() => {
       for (const shape of validated) {
@@ -105,6 +117,7 @@ export class BoardStore {
 
   /** Applies patches atomically. Every patched shape is validated before anything is written. */
   updateShapes(updates: readonly { id: string; patch: ShapePatch }[]): void {
+    this.assertWritable();
     const now = this.now();
     const planned = updates.map(({ id, patch }) => {
       const current = this.readCurrent(id);
@@ -133,6 +146,7 @@ export class BoardStore {
 
   /** Deletes shapes and any arrow bound to them (a dangling arrow has no meaning). */
   deleteShapes(ids: Iterable<string>): void {
+    this.assertWritable();
     const toDelete = new Set(ids);
     for (const [id, yShape] of this.yShapes) {
       if (yShape.get("type") !== "arrow") continue;

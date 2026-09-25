@@ -14,6 +14,9 @@ export default defineConfig({
     env: { NODE_ENV: "test", ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}) },
     // Database round trips to a hosted Postgres can be slow.
     testTimeout: 60_000,
+    // Test files share one (hosted) database: running them one at a time keeps timings
+    // meaningful (the 2,000-shape load budget) and stays within the pooler's connection limit.
+    fileParallelism: false,
     hookTimeout: 60_000,
   },
 });

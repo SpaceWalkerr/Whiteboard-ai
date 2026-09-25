@@ -2,7 +2,13 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Logger } from "pino";
 import { WebSocketServer } from "ws";
-import { boardIdSchema, CLOSE_CODES, MAX_CLIENT_MESSAGE_BYTES } from "@whiteboard/shared/sync";
+import {
+  boardIdSchema,
+  CLOSE_CODES,
+  MAX_CLIENT_MESSAGE_BYTES,
+  SYNC_SUBPROTOCOL,
+} from "@whiteboard/shared/sync";
+import type { RevocationBus, RevocationEvent } from "../revocation/bus";
 import type { AuthorizeConnection } from "./auth";
 import { SyncConnection } from "./connection";
 import type { SyncMetrics } from "./metrics";
@@ -26,6 +32,8 @@ export interface SyncServerOptions {
   flushMs: number;
   /** Compact into a snapshot after this many updates. */
   snapshotEvery: number;
+  /** Access revocations; matching connections are closed at once. */
+  revocations?: RevocationBus | undefined;
 }
 
 export interface SyncServer {
@@ -45,7 +53,12 @@ export interface SyncServer {
  */
 export function attachSyncServer(server: Server, options: SyncServerOptions): SyncServer {
   const { logger, metrics } = options;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_MESSAGE_BYTES });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_CLIENT_MESSAGE_BYTES,
+    // Echo the sync subprotocol (never the ticket) back to the client.
+    handleProtocols: (protocols) => (protocols.has(SYNC_SUBPROTOCOL) ? SYNC_SUBPROTOCOL : false),
+  });
   const rooms = new RoomManager({
     graceMs: options.roomGraceMs,
     metrics,
@@ -136,6 +149,29 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     );
   });
 
+  const affects = (connection: SyncConnection, event: RevocationEvent): boolean => {
+    if (connection.room.boardId !== event.boardId) return false;
+    switch (event.type) {
+      case "board_deleted":
+        return true;
+      case "member":
+        return connection.identity.userId === event.userId;
+      case "link":
+        return connection.identity.linkId === event.linkId;
+      case "public_off":
+        return connection.identity.viaPublic;
+    }
+  };
+  const unsubscribeRevocations = options.revocations?.subscribe((event) => {
+    for (const connection of connections) {
+      if (!affects(connection, event)) continue;
+      metrics.messages.inc({ type: "revoked" });
+      if (event.type === "board_deleted")
+        connection.close(CLOSE_CODES.boardDeleted, "board deleted");
+      else connection.close(CLOSE_CODES.accessChanged, "access changed");
+    }
+  });
+
   const heartbeat = setInterval(() => {
     for (const connection of connections) connection.heartbeat();
   }, options.heartbeatMs ?? 30_000);
@@ -146,6 +182,7 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     close: async (deadline = Date.now() + 20_000) => {
       accepting = false;
       clearInterval(heartbeat);
+      unsubscribeRevocations?.();
       for (const connection of connections) connection.freeze();
       await rooms.flushAll(deadline);
       for (const connection of connections)

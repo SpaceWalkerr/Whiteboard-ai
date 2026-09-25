@@ -11,6 +11,10 @@ export const webEnvSchema = z.object({
     .url()
     .refine((value) => /^wss?:\/\//.test(value), { message: "must be a ws:// or wss:// URL" })
     .transform((value) => value.replace(/\/$/, "")),
+  /** Supabase project URL (public). The frontend uses Supabase for sign-in only. */
+  VITE_SUPABASE_URL: z.url(),
+  /** Supabase publishable (anon) key — public by design; RLS keeps our tables closed to it. */
+  VITE_SUPABASE_PUBLISHABLE_KEY: z.string().min(20),
   /**
    * Exposes window.__whiteboard test hooks (E2E and performance runs only). Never set this for
    * a deployed build.

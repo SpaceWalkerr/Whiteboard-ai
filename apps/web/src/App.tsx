@@ -1,51 +1,71 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
-import { boardIdSchema } from "@whiteboard/shared/sync";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import type { WebEnv } from "@whiteboard/shared/env/web";
+import { AuthCallbackPage } from "@/auth/AuthCallbackPage";
+import { AuthProvider } from "@/auth/AuthProvider";
+import { InvitePage, ShareLinkPage } from "@/auth/LinkLandingPages";
+import { LoadingPage, RequireAuth } from "@/auth/RequireAuth";
+import { SignInPage } from "@/auth/SignInPage";
+import { supabaseClient } from "@/lib/supabase";
+import { DashboardPage } from "@/pages/DashboardPage";
 import { HomePage } from "@/pages/HomePage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 
 // The board pulls in Konva and Yjs; load it only when a board is opened.
-const BoardPage = lazy(() =>
-  import("@/features/board/BoardPage").then((m) => ({ default: m.BoardPage })),
+const BoardRoute = lazy(() =>
+  import("@/features/board/BoardRoute").then((m) => ({ default: m.BoardRoute })),
 );
-
-/** Unguessable id: until Phase 4 adds permissions, knowing the link is what grants access. */
-function newBoardId(): string {
-  return crypto.randomUUID();
-}
-
-function BoardRoute({ env }: { env: WebEnv }) {
-  const { boardId = "" } = useParams();
-  if (!boardIdSchema.safeParse(boardId).success) return <NotFoundPage />;
-  return (
-    <Suspense fallback={<p className="p-6 text-sm text-muted-foreground">Loading board…</p>}>
-      {/* Keyed so switching boards starts a fresh session. */}
-      <BoardPage
-        key={boardId}
-        boardId={boardId}
-        serverUrl={env.VITE_WS_URL}
-        debugTools={env.VITE_DEBUG_TOOLS}
-      />
-    </Suspense>
-  );
-}
 
 export function App({ env }: { env: WebEnv }) {
   const [queryClient] = useState(() => new QueryClient());
+  const [supabase] = useState(() => supabaseClient(env));
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<HomePage apiUrl={env.VITE_API_URL} />} />
-          {/* The Phase 1 local board is now just "a new board". */}
-          <Route path="/board/local" element={<Navigate to={`/board/${newBoardId()}`} replace />} />
-          <Route path="/board/:boardId" element={<BoardRoute env={env} />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </BrowserRouter>
+      <AuthProvider supabase={supabase} apiUrl={env.VITE_API_URL}>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<HomePage apiUrl={env.VITE_API_URL} />} />
+            <Route path="/sign-in" element={<SignInPage />} />
+            <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            <Route
+              path="/app"
+              element={
+                <RequireAuth>
+                  <DashboardPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/s/:token"
+              element={
+                <RequireAuth>
+                  <ShareLinkPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/invite/:token"
+              element={
+                <RequireAuth>
+                  <InvitePage />
+                </RequireAuth>
+              }
+            />
+            <Route path="/board/local" element={<Navigate to="/app" replace />} />
+            <Route
+              path="/board/:boardId"
+              element={
+                <Suspense fallback={<LoadingPage label="Opening board…" />}>
+                  <BoardRoute env={env} />
+                </Suspense>
+              }
+            />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

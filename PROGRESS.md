@@ -2,8 +2,8 @@
 
 ## Current phase
 
-Phase 3 — Persistence + offline: implemented, awaiting manual verification.
-(Phases 0–2 committed.)
+Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual verification
+(needs the Supabase publishable + service-role keys, see Known issues). Phases 0–3 committed.
 
 ## Done
 
@@ -143,6 +143,54 @@ Phase 3 — Persistence + offline: implemented, awaiting manual verification.
 - Crash test result: 200/200 acknowledged edits recovered after `kill -9`; the 100 edits sent in
   the last few ms (unacknowledged, sender also gone) were not — as the guarantee allows.
 
+### Phase 4 — Auth, workspaces, permissions, sharing
+
+- Migrations `0002_auth_sharing_audit` (profiles.email; boards.org_id / folder_id / is_public /
+  thumbnail_path; `organizations`, `memberships`, `folders`, `board_members`, `share_links`,
+  `invites`, `board_visits`, `audit_logs`, all with RLS on and no policies) and
+  `0003_storage_buckets` (private `board-thumbnails` bucket, PNG only, 300 KB).
+- Auth: Supabase Auth in the browser (magic link, Google, GitHub; PKCE; `/auth/callback`
+  handles both `code` and `token_hash`); sign out / sign out everywhere (Supabase global
+  scope) also deletes every IndexedDB board copy and cached board details. The server verifies
+  the access token on every REST request against the project's JWKS (`jose`, asymmetric keys
+  only). `POST /me/bootstrap` (first sign-in) creates the profile + personal workspace and
+  accepts pending invites addressed to the user's verified email.
+- Permissions: one table `can(role, action)` (read/write/share/delete) used by REST and the
+  WebSocket. Effective role = highest of board membership, org owner/admin (→ owner), a valid
+  share link (signed-in users only) and the public toggle (→ viewer).
+- Sync auth: `POST /boards/:id/ticket` returns a 5-minute HS256 room ticket {userId, boardId,
+  role} signed with `ROOM_TICKET_SECRET`; the client sends it as a WebSocket subprotocol
+  (`ticket.<jwt>`, never in the URL). The upgrade checks Origin, verifies the ticket, and
+  re-checks the role in the database (lower of ticket and current role wins); every reconnect
+  gets a new ticket. Viewers' sync/update messages are dropped server-side
+  (`sync_write_denied_total`) and the web store is read-only for them.
+- Revocation: removing a member, revoking a share link, turning public off or deleting a board
+  publishes an event (in-process now, Redis pub/sub when `REDIS_URL` is set) that closes the
+  matching sockets (4403 → client re-tickets and gets its new role or "No access"; 4404 for
+  deleted boards).
+- Sharing dialog (owners): invite by email with role (email via Resend or logged in dev),
+  pending invites + revoke, members with role change / remove, create/copy/revoke viewer or
+  editor share links (only a SHA-256 hash is stored), public read-only toggle. Members can
+  leave a board. Landing pages `/s/:token` and `/invite/:token` (sign-in first).
+- Dashboard `/app`: My boards, Shared with me, Recent, Trash; search; folders (create, rename,
+  delete → boards kept); create, rename, duplicate (copies content into my workspace), move to
+  folder, delete (soft) and restore within 30 days; `POST /internal/purge-trash` (CRON_SECRET)
+  hard-deletes older trash and its thumbnail.
+- Thumbnails: rendered in the browser 5 s after the user's own edits (at most once a minute),
+  uploaded as PNG to the server, stored in private Supabase Storage with the service key; the
+  dashboard gets 5-minute signed URLs.
+- Rate limits (`@fastify/rate-limit`, Redis store when available): 300 req/min per user/IP
+  overall, 60 tickets/min, 20 invites/hour. Auth itself (sign-in emails) is rate-limited by
+  Supabase Auth.
+- Audit: every board create/delete/restore/purge, public on/off, member add/role change/remove,
+  invite create/accept/revoke and share-link create/revoke writes an `audit_logs` row.
+- Tests: server 116 (authz matrix: role × read/write/share/delete over REST and WebSocket,
+  viewer sending raw Yjs updates can't change the board, revocation kicks live sockets, links
+  and public toggle, invites, audit rows, rate limits; dashboard, folders, duplicate,
+  thumbnails, purge). Shared 82, web 85. Playwright `auth.spec.ts`: magic-link sign-in (link
+  generated with the admin API), create board, invite second user who edits live; viewer via
+  link is read-only; revoking the link kicks the viewer. Existing E2E specs now sign in first.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -239,7 +287,8 @@ Phase 3 — Persistence + offline: implemented, awaiting manual verification.
   to the nearest snapshot and play archived updates forward, with per-edit authorship and
   time. Periodic snapshots alone would lose everything between two snapshots (a scrubber needs
   every step). Yjs updates are small; storage/retention limits per plan are a Phase 10 concern.
-- **Board row is created with the first saved update**, so opening random URLs stores nothing.
+- **Boards are created explicitly** (`POST /boards`, Phase 4) with an owner; the sync server
+  no longer creates board rows, and edits to a missing board are dropped (`BoardMissingError`).
 - **Compaction reads from the database, not memory**, inside one transaction that locks the
   board row (`SELECT … FOR UPDATE`), so it is exact and safe with multiple instances later.
   It is an optimisation: a failed compaction leaves updates safely in `board_updates`.
@@ -252,6 +301,24 @@ Phase 3 — Persistence + offline: implemented, awaiting manual verification.
   New dependency `vite-plugin-pwa` (approved).
 - **Drizzle query helpers are re-exported from `@whiteboard/shared/db`**: pnpm resolved a second
   `drizzle-orm` copy for the server (different optional peers), which broke types.
+
+- **Room ticket in `Sec-WebSocket-Protocol` + database re-check on upgrade** (Phase 4): URLs end
+  up in logs; the re-check makes a removed member's old ticket useless immediately.
+- **Only owners share** (invite, links, roles, public toggle); editors edit. Simplest model that
+  matches the acceptance criteria; revisit with team plans (Phase 10).
+- **Share links require sign-in**; anonymous access exists only through the public read-only
+  toggle. Keeps every write attributable to a user.
+- **Invites are accepted by verified email** (on `/invite/:token` or automatically at next
+  sign-in), never by whoever holds the link.
+- **Org owners/admins act as board owners** in their org; boards without an owner from before
+  Phase 4 are inaccessible (dev data only).
+- **Thumbnails are rendered in the browser** (we already have the Konva scene there) and
+  uploaded; server-side rendering would need a headless canvas.
+- **Cron endpoints live outside the user-auth scope** and use a separate `CRON_SECRET`.
+- **Server tests run files sequentially** (`fileParallelism: false`): they share one hosted dev
+  database and several measure timings.
+- **Dev email transport logs invite links** instead of sending (`EMAIL_TRANSPORT=log`);
+  production refuses to boot without Resend.
 
 ## Known issues
 
@@ -276,8 +343,8 @@ Phase 3 — Persistence + offline: implemented, awaiting manual verification.
   is not run in CI (shared runners give meaningless frame rates).
 - Playwright's "Desktop Chrome" profile reports a Windows user agent, so on a Mac the app
   expects Ctrl shortcuts in E2E; tests use a `modKey(page)` helper.
-- Board content is also stored in each browser's IndexedDB (by design, for offline). On a
-  shared computer that copy stays after closing the tab; Phase 4 must clear it on sign-out.
+- Board content is also stored in each browser's IndexedDB (by design, for offline). It is
+  cleared on sign-out, but stays if the user just closes the tab on a shared computer.
 - E2E and persistence tests write boards to the database in `DATABASE_URL` (the dev project
   locally). Persistence tests delete what they create; E2E boards are left (like real usage).
 - Hosted Postgres latency varies: one run saw a single compaction take 35 s (normally ~2 s) —
@@ -287,25 +354,33 @@ Phase 3 — Persistence + offline: implemented, awaiting manual verification.
   Phase 5 must allocate them safely across instances (the PK rejects duplicates, so a clash
   fails loudly rather than corrupting).
 - Storage growth from the history archive is unbounded for now (retention limits: Phase 10).
-- Two tabs in the same browser share one guest identity (same name), so they appear as one
-  person in the avatars (cursors still show per tab).
 - `pnpm test:e2e` reuses an already-running local server on :4000 / web on :4173 (faster
   locally); CI always starts fresh ones.
 
+- Phase 4 E2E tests and in-browser sign-in were not run yet: they need
+  `VITE_SUPABASE_PUBLISHABLE_KEY` (apps/web/.env) and `SUPABASE_SERVICE_ROLE_KEY`
+  (apps/server/.env), and in CI a dedicated Supabase project + the `CI_*` GitHub secrets.
+- After "sign out everywhere", an already-issued access token stays valid until it expires
+  (Supabase JWTs are stateless) — set the JWT expiry to 15 min. Sockets re-check at each
+  reconnect/ticket.
+- Ownership transfer and org (team) management UI are not built; a board's owner cannot leave it.
+- Test users created by server/E2E tests are deleted afterwards, but their personal
+  organizations remain in the dev database (no FKs to cascade). Harmless.
+- Trash purge endpoint exists but nothing calls it yet (Render Cron Job in Phase 13).
+- Thumbnails update only when someone edits in a browser; boards edited only by API/tests
+  keep no thumbnail.
+
 ## Later
 
-- Phase 4: replace `allowAllConnections` in `apps/server/src/index.ts` with Supabase JWT
-  verification + board role lookup (token via `Sec-WebSocket-Protocol` or first message, not
-  the URL); replace guest identity with the signed-in user; drop `/board/local`.
-- Phase 4: clear IndexedDB board copies on sign-out; set `boards.owner_id`.
 - Phase 5: share rooms across instances via Redis pub/sub; `render.yaml` already says 2
   instances; allocate `seq` safely across instances.
 - Phase 8: replay = nearest `board_snapshots` row + `board_update_archive`/`board_updates` rows
   after it.
 - Phase 10: retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
-- Phase 4: Supabase Auth env vars (web: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`; server:
-  JWKS URL); `trustProxy` for Render when rate limiting by IP.
+- Phase 10: team organizations (members, admins), ownership transfer, per-plan limits.
+- Phase 13: Render Cron Job calling `POST /internal/purge-trash` daily with `CRON_SECRET`;
+  set `TRUST_PROXY=1` on Render so rate limits see real client IPs.
 - Phase 11: prerender public pages (landing, pricing, templates, docs, legal) at build time.
 - Phase 12: Sentry + PostHog, security headers in `vercel.json`, audit logging.
 - Phase 13: production migrations via Render `preDeployCommand` (the migrate script currently runs

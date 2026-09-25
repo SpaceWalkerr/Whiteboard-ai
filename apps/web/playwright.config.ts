@@ -1,12 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
-import { parseEnv } from "node:util";
 import { defineConfig, devices } from "@playwright/test";
+import { e2eEnv } from "./e2e/env";
 
-// The server persists boards, so E2E needs a real Postgres: DATABASE_URL from the environment
-// (CI) or from apps/server/.env (local development).
-const serverEnvFile = new URL("../server/.env", import.meta.url);
-const serverEnv = existsSync(serverEnvFile) ? parseEnv(readFileSync(serverEnvFile, "utf8")) : {};
-const databaseUrl = process.env.DATABASE_URL ?? serverEnv.DATABASE_URL;
+// E2E needs a real Postgres (boards are persisted) and a real Supabase Auth project (users sign
+// in for real): values come from the environment (CI) or apps/server/.env and apps/web/.env.
 
 const API_PORT = 4000;
 const WEB_PORT = 4173;
@@ -46,15 +42,13 @@ export default defineConfig({
       reuseExistingServer: !isCI,
       timeout: 60_000,
       env: {
-        NODE_ENV: "production",
-        LOG_LEVEL: "warn",
+        NODE_ENV: "test",
         PORT: String(API_PORT),
-        ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
-        // Production mode requires Redis; nothing in these tests reaches it.
-        REDIS_URL: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
         CORS_ALLOWED_ORIGINS: `http://localhost:${WEB_PORT}`,
-        // Production mode requires a metrics token; this one only guards the E2E server.
-        METRICS_TOKEN: "e2e-metrics-token-0123456789abcdef",
+        APP_URL: `http://localhost:${WEB_PORT}`,
+        ...(e2eEnv.databaseUrl ? { DATABASE_URL: e2eEnv.databaseUrl } : {}),
+        ...(e2eEnv.supabaseUrl ? { SUPABASE_URL: e2eEnv.supabaseUrl } : {}),
+        ...(e2eEnv.ticketSecret ? { ROOM_TICKET_SECRET: e2eEnv.ticketSecret } : {}),
       },
     },
     {

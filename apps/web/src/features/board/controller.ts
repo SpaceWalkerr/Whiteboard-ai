@@ -94,6 +94,18 @@ export class BoardController {
 
   readonly lookup: ShapeLookup = (id) => this.store.getShape(id);
 
+  /** View-only board (the user is a viewer): every editing command is a no-op. */
+  get readOnly(): boolean {
+    return this.store.readOnly;
+  }
+
+  /** Switches view-only mode (e.g. the user was downgraded to viewer mid-session). */
+  setReadOnly(readOnly: boolean): void {
+    if (this.store.readOnly === readOnly) return;
+    this.store.readOnly = readOnly;
+    this.setUi({ tool: "select", draft: null, editingId: null, bindTargetId: null });
+  }
+
   getUi = (): BoardUiState => this.ui;
 
   subscribeUi = (listener: () => void): (() => void) => {
@@ -109,6 +121,7 @@ export class BoardController {
   // ---------------------------------------------------------------- UI state
 
   setTool(tool: ToolId): void {
+    if (this.readOnly && tool !== "select") return;
     this.setUi({ tool, draft: null, bindTargetId: null, editingId: null });
   }
 
@@ -185,6 +198,7 @@ export class BoardController {
 
   /** Adds a finished shape (from a drawing tool) and selects it. */
   addShape(shape: Shape, options: { select?: boolean; keepTool?: boolean } = {}): void {
+    if (this.readOnly) return;
     this.command(() => {
       this.store.createShape({ ...shape, zIndex: this.store.nextZIndex() });
     });
@@ -201,6 +215,7 @@ export class BoardController {
    * its right (moving down past anything in the way) and an arrow links them.
    */
   insertSystemShape(type: SystemShapeType, center: Point, connectFromId: string | null): string {
+    if (this.readOnly) return "";
     const from = connectFromId ? this.store.getShape(connectFromId) : undefined;
     let rect = defaultRectAt(type, center);
     if (from && from.type !== "arrow") {
@@ -248,6 +263,7 @@ export class BoardController {
 
   /** Moves shapes to their original positions + delta (origins captured at gesture start). */
   moveShapes(origins: ReadonlyMap<string, Shape>, dx: number, dy: number): void {
+    if (this.readOnly) return;
     const updates: { id: string; patch: ShapePatch }[] = [];
     for (const [id, origin] of origins) {
       if (origin.type === "arrow") {
@@ -272,6 +288,7 @@ export class BoardController {
       rotation: number;
     }[],
   ): void {
+    if (this.readOnly) return;
     const updates = transforms.flatMap(({ id, x, y, w, h, rotation }) => {
       const shape = this.store.getShape(id);
       if (!shape || shape.type === "arrow") return [];
@@ -294,6 +311,7 @@ export class BoardController {
     point: Point,
     targetId: string | null,
   ): void {
+    if (this.readOnly) return;
     const arrow = this.store.getShape(arrowId);
     if (arrow?.type !== "arrow") return;
     const otherBound = which === "start" ? arrow.toShapeId : arrow.fromShapeId;
@@ -313,6 +331,7 @@ export class BoardController {
   // ---------------------------------------------------------------- editing commands
 
   deleteSelection(): void {
+    if (this.readOnly) return;
     if (this.ui.selectedIds.size === 0) return;
     const ids = [...this.ui.selectedIds];
     this.command(() => {
@@ -322,6 +341,7 @@ export class BoardController {
   }
 
   duplicateSelection(): void {
+    if (this.readOnly) return;
     const selected = this.selectedShapes();
     if (selected.length === 0) return;
     this.insertClones(this.freezeArrows(selected), { x: PASTE_OFFSET, y: PASTE_OFFSET });
@@ -334,6 +354,7 @@ export class BoardController {
   }
 
   cutSelection(): string | null {
+    if (this.readOnly) return null;
     const text = this.copySelection();
     if (text !== null) this.deleteSelection();
     return text;
@@ -344,6 +365,7 @@ export class BoardController {
    * shape. Returns false if there was nothing usable.
    */
   paste(text: string, at: Point | null): boolean {
+    if (this.readOnly) return false;
     const shapes = parseClipboard(text);
     if (shapes) {
       const lookup: ShapeLookup = (id) => shapes.find((s) => s.id === id);
@@ -363,6 +385,7 @@ export class BoardController {
   }
 
   groupSelection(): void {
+    if (this.readOnly) return;
     const selected = this.selectedShapes();
     if (selected.length < 2) return;
     const groupId = this.newId();
@@ -372,6 +395,7 @@ export class BoardController {
   }
 
   ungroupSelection(): void {
+    if (this.readOnly) return;
     const grouped = this.selectedShapes().filter((s) => s.groupId !== null);
     if (grouped.length === 0) return;
     this.command(() => {
@@ -388,6 +412,7 @@ export class BoardController {
   }
 
   reorderSelection(mode: ReorderMode): void {
+    if (this.readOnly) return;
     if (this.ui.selectedIds.size === 0) return;
     const ids = [...this.ui.selectedIds];
     this.command(() => {
@@ -397,12 +422,14 @@ export class BoardController {
 
   /** Arrow-key nudges. Not wrapped in a command, so rapid nudges merge into one undo step. */
   nudgeSelection(dx: number, dy: number): void {
+    if (this.readOnly) return;
     const selected = this.selectedShapes();
     if (selected.length === 0) return;
     this.moveShapes(new Map(selected.map((s) => [s.id, s])), dx, dy);
   }
 
   updateSelectionStyle(style: Partial<ShapeStyle>): void {
+    if (this.readOnly) return;
     const selected = this.selectedShapes();
     if (selected.length === 0) return;
     this.command(() => {
@@ -411,12 +438,14 @@ export class BoardController {
   }
 
   updateShape(id: string, patch: ShapePatch): void {
+    if (this.readOnly) return;
     this.command(() => {
       this.store.updateShape(id, patch);
     });
   }
 
   startEditing(id: string): void {
+    if (this.readOnly) return;
     const shape = this.store.getShape(id);
     if (!shape || shapeText(shape) === null) return;
     this.setUi({ editingId: id, selectedIds: new Set([id]), tool: "select" });
@@ -428,6 +457,10 @@ export class BoardController {
 
   /** Saves edited text. An emptied text shape is removed, as in most whiteboards. */
   commitText(id: string, value: string, measuredHeight: number | null): void {
+    if (this.readOnly) {
+      this.stopEditing();
+      return;
+    }
     const shape = this.store.getShape(id);
     this.stopEditing();
     if (!shape) return;
@@ -451,10 +484,12 @@ export class BoardController {
   }
 
   undo(): void {
+    if (this.readOnly) return;
     this.history.undo();
   }
 
   redo(): void {
+    if (this.readOnly) return;
     this.history.redo();
   }
 
@@ -492,6 +527,7 @@ export class BoardController {
   }
 
   private applyUnitDeltas(compute: (units: AlignUnit[]) => Map<string, Delta>): void {
+    if (this.readOnly) return;
     const members = new Map<string, Shape[]>();
     for (const shape of this.selectedShapes()) {
       if (shape.type === "arrow") continue;

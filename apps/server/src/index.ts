@@ -7,7 +7,12 @@ import { createOriginMatcher } from "./http/origins";
 import { closeRedis, createRedis } from "./infra/redis";
 import { createLogger } from "./logger";
 import { createShutdown } from "./shutdown";
-import { allowAllConnections } from "./sync/auth";
+import { LocalRevocationBus, RedisRevocationBus } from "./revocation/bus";
+import { TicketIssuer } from "./auth/tickets";
+import { createTokenVerifier, supabaseJwks } from "./auth/verifier";
+import { LogMailer, ResendMailer } from "./email/mailer";
+import { SupabaseThumbnailStorage } from "./storage/thumbnails";
+import { ticketAuthorizer } from "./sync/ticketAuth";
 import { createSyncMetrics } from "./sync/metrics";
 import { attachSyncServer } from "./sync/upgrade";
 
@@ -37,6 +42,19 @@ async function main(): Promise<void> {
     allowedOriginPattern: env.CORS_ALLOWED_ORIGIN_PATTERN,
   });
 
+  const tickets = new TicketIssuer(env.ROOM_TICKET_SECRET);
+  const revocations = redis ? new RedisRevocationBus(redis, logger) : new LocalRevocationBus();
+  const mailer =
+    env.EMAIL_TRANSPORT === "resend" && env.RESEND_API_KEY && env.EMAIL_FROM
+      ? new ResendMailer(env.RESEND_API_KEY, env.EMAIL_FROM)
+      : new LogMailer(logger);
+
+  const repository = new PgBoardRepository(db);
+  const thumbnails = env.SUPABASE_SERVICE_ROLE_KEY
+    ? new SupabaseThumbnailStorage(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
+    : undefined;
+  if (!thumbnails) logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; board thumbnails are disabled");
+
   const metrics = createSyncMetrics();
   const app = buildApp({
     logger,
@@ -46,11 +64,29 @@ async function main(): Promise<void> {
       ...(redis ? [{ name: "redis", check: () => redis.ping() }] : []),
     ],
     metrics: { registry: metrics.registry, token: env.METRICS_TOKEN },
+    trustProxy: env.TRUST_PROXY,
+    api: {
+      db,
+      verifier: createTokenVerifier({
+        issuer: `${env.SUPABASE_URL}/auth/v1`,
+        keys: supabaseJwks(env.SUPABASE_URL),
+      }),
+      tickets,
+      mailer,
+      revocations,
+      logger,
+      appUrl: env.APP_URL,
+      redis,
+      thumbnails,
+      boardStore: repository,
+      cronSecret: env.CRON_SECRET,
+    },
   });
   const sync = attachSyncServer(app.server, {
     isAllowedOrigin,
-    // TEMPORARY: Phase 4 replaces this with Supabase JWT verification + board role lookup.
-    authorize: allowAllConnections,
+    // Room ticket from the REST API, re-checked against the database on every upgrade.
+    authorize: ticketAuthorizer(tickets, db),
+    revocations,
     logger,
     metrics,
     roomGraceMs: env.SYNC_ROOM_GRACE_MS,
@@ -60,7 +96,7 @@ async function main(): Promise<void> {
       bytesPerSecond: env.SYNC_BYTES_PER_SEC,
       bytesBurst: env.SYNC_BYTES_BURST,
     },
-    repository: new PgBoardRepository(db),
+    repository,
     flushMs: env.SYNC_FLUSH_MS,
     snapshotEvery: env.SNAPSHOT_EVERY_UPDATES,
   });
@@ -76,6 +112,7 @@ async function main(): Promise<void> {
         run: () => sync.close(Date.now() + Math.max(1_000, env.SHUTDOWN_TIMEOUT_MS - 5_000)),
       },
       { name: "http", run: () => app.close() },
+      { name: "revocations", run: () => revocations.close() },
       ...(redis ? [{ name: "redis", run: () => closeRedis(redis) }] : []),
       { name: "postgres", run: () => sql.end({ timeout: 5 }) },
     ],

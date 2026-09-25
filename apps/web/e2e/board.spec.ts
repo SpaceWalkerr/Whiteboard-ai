@@ -1,6 +1,11 @@
+import { deleteE2EUsers } from "./auth";
 import { expect, test } from "@playwright/test";
 import { isOnOutline, resolveArrow } from "../src/features/board/geometry/arrow";
 import { arrows, center, drag, modKey, openBoard, shapes, toScreen } from "./helpers";
+
+test.afterAll(async () => {
+  await deleteE2EUsers();
+});
 
 test.describe("board", () => {
   test("arrows stay attached when a shape moves, and undo restores the position", async ({

@@ -13,8 +13,7 @@ export function HomePage({ apiUrl }: { apiUrl: string }) {
           architecture like a senior engineer.
         </p>
         <Button asChild size="lg">
-          {/* /board/local redirects to a fresh board id. */}
-          <Link to="/board/local">New board</Link>
+          <Link to="/app">Open your boards</Link>
         </Button>
       </header>
       <Card>

@@ -30,6 +30,37 @@ export function exportSvg(ordered: readonly Shape[], filename = "board.svg"): bo
   return true;
 }
 
+/**
+ * Rasterizes the board to a PNG scaled to fit `maxWidth` × `maxHeight` (thumbnails). Returns
+ * null for an empty board.
+ */
+export async function renderThumbnail(
+  ordered: readonly Shape[],
+  maxWidth: number,
+  maxHeight: number,
+): Promise<Blob | null> {
+  const result = boardToSvg(ordered, { measure: canvasMeasure(), padding: 24 });
+  if (!result) return null;
+  const scale = Math.min(maxWidth / result.bounds.width, maxHeight / result.bounds.height, 1);
+  const url = URL.createObjectURL(new Blob([result.svg], { type: "image/svg+xml" }));
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(result.bounds.width * scale));
+    canvas.height = Math.max(1, Math.round(result.bounds.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 /** PNG is rasterized from the SVG export, so it includes shapes currently culled off-screen. */
 export async function exportPng(
   ordered: readonly Shape[],

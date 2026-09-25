@@ -1,4 +1,5 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { createE2EUser, signInWithMagicLink, type E2EUser } from "./auth";
 import type { ArrowShape, Shape } from "@whiteboard/shared/board";
 
 export interface Point {
@@ -6,11 +7,63 @@ export interface Point {
   y: number;
 }
 
-/** Opens a new board (or `url`) and waits until it is connected to the sync server. */
-export async function openBoard(page: Page, url = "/board/local"): Promise<void> {
-  await page.goto(url);
+const signedIn = new WeakMap<BrowserContext, E2EUser>();
+
+/** Signs the page's browser context in as a fresh user (once per context). */
+export async function ensureSignedIn(page: Page, name = "Tester"): Promise<E2EUser> {
+  const existing = signedIn.get(page.context());
+  if (existing) return existing;
+  const user = await createE2EUser(name);
+  await signInWithMagicLink(page, user);
+  signedIn.set(page.context(), user);
+  return user;
+}
+
+/**
+ * Without `url`: signs in (if needed) and creates a new board from the dashboard. With `url`:
+ * opens that board. Either way, waits until it is connected to the sync server.
+ */
+export async function openBoard(page: Page, url?: string): Promise<void> {
+  if (url === undefined) {
+    await ensureSignedIn(page);
+    await page.goto("/app");
+    await page.getByRole("button", { name: "New board" }).click();
+    await page.waitForURL("**/board/*");
+  } else {
+    await page.goto(url);
+  }
   await expect(page.getByRole("main", { name: /Whiteboard canvas/ })).toBeVisible();
   await page.waitForFunction(() => window.__whiteboard?.status() === "connected");
+}
+
+/** Owner side: creates an editor share link through the Share dialog and returns its URL. */
+export async function createShareLink(
+  page: Page,
+  role: "editor" | "viewer" = "editor",
+): Promise<string> {
+  await page.getByRole("button", { name: "Share" }).click();
+  const dialog = page.getByRole("dialog", { name: "Share board" });
+  await dialog.getByRole("combobox", { name: "Access for the new link" }).click();
+  await page.getByRole("option", { name: role === "editor" ? "Can edit" : "Can view" }).click();
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  const url = await dialog.getByRole("textbox", { name: "New share link" }).inputValue();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  return url;
+}
+
+/** Collaborator side: signs in as a new user and opens a share link. */
+export async function joinViaLink(
+  page: Page,
+  url: string,
+  name = "Collaborator",
+): Promise<E2EUser> {
+  const user = await ensureSignedIn(page, name);
+  await page.goto(url);
+  await page.waitForURL("**/board/*");
+  await expect(page.getByRole("main", { name: /Whiteboard canvas/ })).toBeVisible();
+  await page.waitForFunction(() => window.__whiteboard?.status() === "connected");
+  return user;
 }
 
 export async function insertShape(page: Page, query: string): Promise<void> {

@@ -11,7 +11,8 @@
     "./schemas": "./src/schemas/index.ts",
     "./db": "./src/db/index.ts",
     "./board": "./src/board/index.ts",
-    "./sync": "./src/sync/index.ts"
+    "./sync": "./src/sync/index.ts",
+    "./api": "./src/api/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings=0",

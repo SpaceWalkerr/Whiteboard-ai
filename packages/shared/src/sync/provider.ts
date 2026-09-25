@@ -10,6 +10,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
 import { backoffDelay, type BackoffOptions } from "./backoff";
 import {
+  CLOSE_CODES,
   encodeAwarenessMessage,
   encodeMessage,
   MAX_SERVER_MESSAGE_BYTES,
@@ -18,10 +19,19 @@ import {
   MESSAGE_SYNC,
   readAwarenessEntries,
   roomPath,
+  SYNC_SUBPROTOCOL,
+  TICKET_PROTOCOL_PREFIX,
   toUint8Array,
 } from "./protocol";
 
-export type SyncStatus = "connecting" | "connected" | "reconnecting" | "offline";
+/** "denied" = no (longer any) access to this board; the provider stops reconnecting. */
+export type SyncStatus = "connecting" | "connected" | "reconnecting" | "offline" | "denied";
+
+export type DeniedReason = "unauthorized" | "forbidden" | "not_found";
+
+/** Result of asking the API for a room ticket before (re)connecting. */
+export type TicketResult =
+  { ok: true; ticket: string } | { ok: false; reason: DeniedReason | "error" };
 
 /** "saved" once the server confirms every edit in this document is committed to its database. */
 export type SaveState = "saved" | "saving";
@@ -50,7 +60,12 @@ export interface SyncProviderOptions {
   boardId: string;
   doc: Y.Doc;
   awareness: Awareness;
-  createSocket?: (url: string) => WebSocketLike;
+  createSocket?: (url: string, protocols: string[]) => WebSocketLike;
+  /**
+   * Fetches a fresh room ticket before every connection attempt (so every reconnect re-checks
+   * access). Omitted only in tests against a server without authorization.
+   */
+  getTicket?: () => Promise<TicketResult>;
   network?: NetworkSignal | null;
   backoff?: BackoffOptions;
   /** Schedules a flush of batched outgoing updates (requestAnimationFrame in browsers). */
@@ -84,14 +99,17 @@ export class SyncProvider {
   private persisted = new Map<number, number>();
   private saveState: SaveState = "saved";
   private readonly unsubscribeNetwork: () => void;
-  private readonly createSocket: (url: string) => WebSocketLike;
+  private readonly createSocket: (url: string, protocols: string[]) => WebSocketLike;
+  private deniedReason: DeniedReason | null = null;
+  private connecting = false;
   private readonly scheduleFlush: (flush: () => void) => void;
   private readonly backoff: BackoffOptions;
   private readonly random: () => number;
 
   constructor(private readonly options: SyncProviderOptions) {
     this.createSocket =
-      options.createSocket ?? ((url) => new globalThis.WebSocket(url) as unknown as WebSocketLike);
+      options.createSocket ??
+      ((url, protocols) => new globalThis.WebSocket(url, protocols) as unknown as WebSocketLike);
     this.scheduleFlush =
       options.scheduleFlush ??
       ((flush) => {
@@ -117,6 +135,9 @@ export class SyncProvider {
   }
 
   getStatus = (): SyncStatus => this.status;
+
+  /** Why access was denied (when status is "denied"). */
+  getDeniedReason = (): DeniedReason | null => this.deniedReason;
 
   getSaveState = (): SaveState => this.saveState;
 
@@ -144,7 +165,7 @@ export class SyncProvider {
 
   /** Drops the connection and reconnects immediately (e.g. the browser came back online). */
   reconnectNow(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.status === "denied") return;
     this.clearReconnect();
     this.closeSocket();
     this.attempt = 0;
@@ -152,12 +173,35 @@ export class SyncProvider {
   }
 
   private connect(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.connecting || this.status === "denied") return;
     this.setStatus(this.hasConnected ? "reconnecting" : "connecting");
+    this.connecting = true;
+    void this.openSocket().finally(() => {
+      this.connecting = false;
+    });
+  }
+
+  private async openSocket(): Promise<void> {
+    const protocols = [SYNC_SUBPROTOCOL];
+    if (this.options.getTicket) {
+      let result: TicketResult;
+      try {
+        result = await this.options.getTicket();
+      } catch {
+        result = { ok: false, reason: "error" };
+      }
+      if (this.destroyed || this.status === "offline") return;
+      if (!result.ok) {
+        if (result.reason === "error") this.scheduleReconnect();
+        else this.deny(result.reason);
+        return;
+      }
+      protocols.push(`${TICKET_PROTOCOL_PREFIX}${result.ticket}`);
+    }
     const url = `${this.options.serverUrl.replace(/\/$/, "")}${roomPath(this.options.boardId)}`;
     let socket: WebSocketLike;
     try {
-      socket = this.createSocket(url);
+      socket = this.createSocket(url, protocols);
     } catch {
       this.scheduleReconnect();
       return;
@@ -189,12 +233,21 @@ export class SyncProvider {
       if (socket !== this.socket) return;
       this.handleMessage(event.data);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (socket !== this.socket) return;
       this.socket = null;
       this.dropRemotePresence();
       if (this.destroyed || this.status === "offline") return;
-      this.scheduleReconnect();
+      if (event.code === CLOSE_CODES.boardDeleted) {
+        this.deny("not_found");
+      } else if (event.code === CLOSE_CODES.accessChanged) {
+        // Our access changed: reconnect right away with a fresh ticket (which re-checks it).
+        this.attempt = 0;
+        this.setStatus("reconnecting");
+        this.connect();
+      } else {
+        this.scheduleReconnect();
+      }
     };
     socket.onerror = () => {
       // onclose follows; reconnect is handled there.
@@ -268,6 +321,12 @@ export class SyncProvider {
     } catch {
       this.reconnectNow();
     }
+  }
+
+  private deny(reason: DeniedReason): void {
+    this.clearReconnect();
+    this.deniedReason = reason;
+    this.setStatus("denied");
   }
 
   private goOffline(): void {

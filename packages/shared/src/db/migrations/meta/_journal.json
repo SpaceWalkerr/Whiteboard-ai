@@ -15,6 +15,20 @@
       "when": 1790299947803,
       "tag": "0001_boards_and_history",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790302145259,
+      "tag": "0002_auth_sharing_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790302145894,
+      "tag": "0003_storage_buckets",
+      "breakpoints": true
     }
   ]
 }

@@ -90,6 +90,12 @@ export class CanvasInteractions {
     }
     const { tool } = this.controller.getUi();
     const target = this.targetShape(input.targetId);
+    if (this.controller.readOnly) {
+      // Viewers can select (to inspect/copy) and marquee, but never move or draw.
+      if (target) this.controller.select([target.id], input.shift ? "toggle" : "replace");
+      else this.gesture = { kind: "marquee", startWorld: input.world, base: new Set() };
+      return;
+    }
 
     if (tool === "select") {
       this.downSelect(input, target);
@@ -109,6 +115,7 @@ export class CanvasInteractions {
 
   /** Called by the endpoint handles of a selected arrow. */
   beginArrowEndDrag(arrowId: string, which: "start" | "end"): void {
+    if (this.controller.readOnly) return;
     this.controller.beginGesture();
     this.gesture = { kind: "arrowEnd", arrowId, which };
   }
@@ -243,6 +250,7 @@ export class CanvasInteractions {
   }
 
   doubleClick(input: PointerInput): void {
+    if (this.controller.readOnly) return;
     const target = this.targetShape(input.targetId);
     if (target) {
       this.controller.startEditing(target.id);

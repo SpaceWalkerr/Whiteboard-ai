@@ -1,18 +1,33 @@
+import { deleteE2EUsers } from "./auth";
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { center, drag, insertShape, openBoard, shapes, toScreen } from "./helpers";
+import {
+  center,
+  createShareLink,
+  drag,
+  insertShape,
+  joinViaLink,
+  openBoard,
+  shapes,
+  toScreen,
+} from "./helpers";
 
 /** Two separate browser contexts = two different people (separate storage, separate guests). */
 async function twoUsers(browser: Browser): Promise<{ a: Page; b: Page }> {
   const a = await (await browser.newContext()).newPage();
   const b = await (await browser.newContext()).newPage();
   await openBoard(a);
-  await openBoard(b, a.url());
+  const link = await createShareLink(a, "editor");
+  await joinViaLink(b, link);
   return { a, b };
 }
 
 function types(page: Page) {
   return shapes(page).then((all) => all.map((s) => s.type).sort());
 }
+
+test.afterAll(async () => {
+  await deleteE2EUsers();
+});
 
 test.describe("real-time collaboration", () => {
   test("a shape drawn by A appears for B, and B's move appears for A", async ({ browser }) => {

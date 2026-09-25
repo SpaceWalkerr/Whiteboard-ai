@@ -35,9 +35,27 @@ cp apps/server/.env.example apps/server/.env
 cp apps/web/.env.example apps/web/.env
 ```
 
-Then set `DATABASE_URL` in `apps/server/.env`: in the Supabase dashboard open your dev project →
-**Connect** → **Session pooler**, copy the URI, put in your database password and keep
-`?sslmode=require` at the end. Everything else in the example files works as is.
+Then fill in, from your Supabase dev project:
+
+- `apps/server/.env` → `DATABASE_URL`: dashboard → **Connect** → **Session pooler**, copy the
+  URI, put in your database password and keep `?sslmode=require` at the end.
+- `apps/server/.env` → `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (**Project Settings → API
+  Keys**, the secret/service_role key), and `ROOM_TICKET_SECRET`
+  (`openssl rand -base64 48`).
+- `apps/web/.env` → `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` (the
+  publishable/anon key — public by design; RLS keeps our tables unreadable through it).
+
+In the Supabase dashboard → **Authentication**:
+
+- **URL Configuration**: Site URL `http://localhost:5173`, redirect URL
+  `http://localhost:5173/auth/callback`.
+- **Sign In / Providers**: enable Email (magic link), Google and GitHub. Each OAuth app's
+  callback URL is `https://<project-ref>.supabase.co/auth/v1/callback`.
+- **JWT**: use asymmetric signing keys (the server verifies tokens with the JWKS) and a 15-minute
+  access-token expiry.
+
+In development invite emails are not sent: the server logs the invite link
+(`EMAIL_TRANSPORT=log`).
 
 Only if you want to run the E2E test locally:
 `pnpm --filter @whiteboard/web exec playwright install chromium`.
@@ -72,9 +90,18 @@ It is required in production (the server refuses to boot without it there).
 
 A pre-commit hook (husky + lint-staged) lints and formats staged files.
 
+### Accounts, dashboard and sharing
+
+Sign in at `/sign-in` (magic link, Google or GitHub). `/app` is the dashboard: your boards,
+boards shared with you, recent boards, folders, search and a 30-day trash. On a board, owners
+click **Share** to invite people by email (editor/viewer), create share links, make the board
+publicly viewable, and change or remove members. Viewers see the board read-only — the server
+rejects their edits too. Removing someone or revoking a link disconnects them within seconds.
+Every share, role and delete action is recorded in `audit_logs`.
+
 ### The board (`/board/:boardId`)
 
-Click **New board** on the home page and share the URL: everyone with the link edits the same
+Click **New board** on the dashboard: everyone with access edits the same
 board live, with cursors and presence. Board state is a Yjs document
 (`packages/shared/src/board`) synced through our own WebSocket server at `/rooms/:boardId`
 (`apps/server/src/sync`, client in `packages/shared/src/sync`). Every edit is written to

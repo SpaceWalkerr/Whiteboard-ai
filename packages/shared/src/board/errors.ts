@@ -14,3 +14,11 @@ export class BoardValidationError extends Error {
     this.issues = issues;
   }
 }
+
+/** A write was attempted on a board opened in view-only mode. */
+export class BoardReadOnlyError extends Error {
+  constructor() {
+    super("This board is view-only");
+    this.name = "BoardReadOnlyError";
+  }
+}

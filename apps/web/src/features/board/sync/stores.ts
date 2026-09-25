@@ -1,6 +1,7 @@
 import type { Awareness } from "y-protocols/awareness";
 import {
   presenceSchema,
+  type DeniedReason,
   type Presence,
   type SaveState,
   type SyncStatus,
@@ -10,11 +11,13 @@ export interface SyncState {
   connection: SyncStatus;
   /** "saved" once the server confirmed every edit in this browser is in its database. */
   save: SaveState;
+  /** Why the server refused us (when connection is "denied"). */
+  denied: DeniedReason | null;
 }
 
 /** Connection + save status as an external store (the provider lives in an effect). */
 export class StatusStore {
-  private state: SyncState = { connection: "connecting", save: "saved" };
+  private state: SyncState = { connection: "connecting", save: "saved", denied: null };
   private readonly listeners = new Set<() => void>();
 
   get = (): SyncState => this.state;
@@ -25,7 +28,13 @@ export class StatusStore {
   };
 
   set(next: SyncState): void {
-    if (next.connection === this.state.connection && next.save === this.state.save) return;
+    if (
+      next.connection === this.state.connection &&
+      next.save === this.state.save &&
+      next.denied === this.state.denied
+    ) {
+      return;
+    }
     this.state = next;
     for (const listener of this.listeners) listener();
   }

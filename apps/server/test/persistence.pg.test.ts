@@ -7,6 +7,7 @@ import { boardUpdateArchive, boardUpdates, count, eq, type Database } from "@whi
 import { encodeMessage, MESSAGE_SYNC } from "@whiteboard/shared/sync";
 import { PgBoardRepository } from "../src/persistence/pgRepository";
 import { buildSnapshot } from "../src/sync/roomPersistence";
+import { createBareBoard } from "./authHelpers";
 import { connectTestDb } from "./pgHelpers";
 import { connectClient, rawSocket, sameState, startServer, waitFor } from "./syncHelpers";
 
@@ -27,8 +28,8 @@ afterAll(async () => {
   await close();
 });
 
-function newBoard(): string {
-  const id = crypto.randomUUID();
+async function newBoard(): Promise<string> {
+  const id = await createBareBoard(db);
   created.push(id);
   return id;
 }
@@ -43,7 +44,7 @@ async function rows(
 
 describe("Postgres persistence", () => {
   it("writes 10,000 updates, compacts them, and reloads exactly the same document", async () => {
-    const boardId = newBoard();
+    const boardId = await newBoard();
     const repository = new PgBoardRepository(db);
     const server = await startServer({
       repository,
@@ -88,7 +89,7 @@ describe("Postgres persistence", () => {
   });
 
   it("loads snapshot + later updates", async () => {
-    const boardId = newBoard();
+    const boardId = await newBoard();
     const repository = new PgBoardRepository(db);
     const doc = new Y.Doc();
     const log: Uint8Array[] = [];
@@ -116,7 +117,7 @@ describe("Postgres persistence", () => {
   });
 
   it("loads a 2,000-shape board quickly (cold room, from Postgres)", async () => {
-    const boardId = newBoard();
+    const boardId = await newBoard();
     const repository = new PgBoardRepository(db);
 
     // Build a realistic board: 2,000 system shapes with some edit history. Capture updates from

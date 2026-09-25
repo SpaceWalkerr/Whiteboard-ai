@@ -11,7 +11,10 @@ beforeAll(async () => {
       Promise.resolve(
         boardId === PRIVATE
           ? { ok: false, status: 403 }
-          : { ok: true, identity: { userId: null, role: "editor" } },
+          : {
+              ok: true,
+              identity: { userId: null, role: "editor", linkId: null, viaPublic: false },
+            },
       ),
   });
 });

@@ -12,6 +12,8 @@ export {
   MESSAGE_SYNC,
   readAwarenessEntries,
   roomPath,
+  SYNC_SUBPROTOCOL,
+  TICKET_PROTOCOL_PREFIX,
   toUint8Array,
   type AwarenessEntry,
 } from "./protocol";
@@ -19,6 +21,8 @@ export {
   SyncProvider,
   type NetworkSignal,
   type SaveState,
+  type DeniedReason,
+  type TicketResult,
   type SyncProviderOptions,
   type SyncStatus,
   type WebSocketLike,

@@ -1,6 +1,10 @@
 import type { Logger } from "pino";
 import * as Y from "yjs";
-import type { BoardRepository, StoredUpdate } from "../persistence/repository";
+import {
+  BoardMissingError,
+  type BoardRepository,
+  type StoredUpdate,
+} from "../persistence/repository";
 import type { SyncMetrics } from "./metrics";
 
 export interface Attribution {
@@ -139,6 +143,17 @@ export class RoomPersistence {
     try {
       await this.options.repository.append(this.options.boardId, batch);
     } catch (error) {
+      if (error instanceof BoardMissingError) {
+        // The board was purged: nothing can ever be stored for it again.
+        const dropped = batch.length + this.pending.length;
+        this.options.logger.warn(
+          { boardId: this.options.boardId, dropped },
+          "board no longer exists; dropping updates",
+        );
+        this.options.metrics.pendingUpdates.dec(dropped);
+        this.pending = [];
+        return;
+      }
       // Put the batch back (in order) and retry later. Seqs are reassigned on retry.
       this.nextSeq -= batch.length;
       this.pending.unshift(...batch.map((u) => ({ ...u, seq: 0 })));

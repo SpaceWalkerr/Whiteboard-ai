@@ -35,6 +35,24 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGIN_PATTERN
         sync: false
+      - key: TRUST_PROXY # Render's load balancer is one hop; rate limits need the client IP
+        value: "1"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY # Storage (thumbnails) only; never sent to the browser
+        sync: false
+      - key: ROOM_TICKET_SECRET # signs 5-minute sync tickets; shared by all instances
+        generateValue: true
+      - key: CRON_SECRET # bearer for /internal/* (trash purge cron, Phase 13)
+        generateValue: true
+      - key: APP_URL # web origin used in invite links
+        sync: false
+      - key: EMAIL_TRANSPORT
+        value: resend
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
       - key: REDIS_URL
         fromService:
           type: keyvalue

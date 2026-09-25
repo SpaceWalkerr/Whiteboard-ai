@@ -1,14 +1,4 @@
-import { useId, useState } from "react";
 import type { PresenceUser } from "@whiteboard/shared/sync";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { Peer } from "../sync/stores";
@@ -42,12 +32,10 @@ interface Props {
   peers: readonly Peer[];
   followingClientId: number | null;
   onFollow: (clientId: number | null) => void;
-  onRename: (name: string) => void;
 }
 
-/** Who is here. Click someone to follow their view; click yourself to change your name. */
-export function PresenceAvatars({ me, peers, followingClientId, onFollow, onRename }: Props) {
-  const [renaming, setRenaming] = useState(false);
+/** Who is here. Click someone to follow their view. */
+export function PresenceAvatars({ me, peers, followingClientId, onFollow }: Props) {
   // One avatar per person even if they have the board open in several tabs (first tab wins,
   // so "follow" consistently tracks the same one).
   const people: Peer[] = [];
@@ -62,16 +50,9 @@ export function PresenceAvatars({ me, peers, followingClientId, onFollow, onRena
     <div role="group" aria-label="People on this board" className="flex items-center -space-x-1.5">
       <Tooltip>
         <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label={`You: ${me.name}. Change your name`}
-            className="rounded-full outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            onClick={() => {
-              setRenaming(true);
-            }}
-          >
+          <span role="img" aria-label={`You: ${me.name}`} className="rounded-full">
             <Avatar user={me} />
-          </button>
+          </span>
         </TooltipTrigger>
         <TooltipContent>{me.name} (you)</TooltipContent>
       </Tooltip>
@@ -107,71 +88,6 @@ export function PresenceAvatars({ me, peers, followingClientId, onFollow, onRena
           </Tooltip>
         );
       })}
-      <RenameDialog open={renaming} onOpenChange={setRenaming} name={me.name} onRename={onRename} />
     </div>
-  );
-}
-
-function RenameDialog({
-  open,
-  onOpenChange,
-  name,
-  onRename,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  name: string;
-  onRename: (name: string) => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-sm">
-        {open && (
-          <RenameForm
-            initial={name}
-            onSubmit={(value) => {
-              onRename(value);
-              onOpenChange(false);
-            }}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function RenameForm({ initial, onSubmit }: { initial: string; onSubmit: (name: string) => void }) {
-  const [value, setValue] = useState(initial);
-  const id = useId();
-  const trimmed = value.trim();
-  return (
-    <form
-      className="grid gap-4"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (trimmed) onSubmit(trimmed);
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle>Your name</DialogTitle>
-        <DialogDescription>Shown to others next to your cursor.</DialogDescription>
-      </DialogHeader>
-      <div className="grid gap-1.5">
-        <label htmlFor={id} className="text-sm font-medium">
-          Name
-        </label>
-        <Input
-          id={id}
-          value={value}
-          maxLength={40}
-          onChange={(e) => {
-            setValue(e.target.value);
-          }}
-        />
-      </div>
-      <Button type="submit" disabled={!trimmed}>
-        Save
-      </Button>
-    </form>
   );
 }

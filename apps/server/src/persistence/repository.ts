@@ -1,3 +1,11 @@
+/** The board row no longer exists (purged); its pending updates can never be stored. */
+export class BoardMissingError extends Error {
+  constructor(boardId: string) {
+    super(`board ${boardId} does not exist`);
+    this.name = "BoardMissingError";
+  }
+}
+
 export interface StoredUpdate {
   seq: number;
   update: Uint8Array;

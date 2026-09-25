@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
-import { insertShape, openBoard, shapes } from "./helpers";
+import { deleteE2EUsers } from "./auth";
+import {
+  createShareLink,
+  ensureSignedIn,
+  insertShape,
+  joinViaLink,
+  openBoard,
+  shapes,
+} from "./helpers";
 
 function saved(page: Page) {
   return page.waitForFunction(() => window.__whiteboard?.saveState() === "saved");
@@ -8,6 +16,10 @@ function saved(page: Page) {
 function types(page: Page) {
   return shapes(page).then((all) => all.map((s) => s.type).sort());
 }
+
+test.afterAll(async () => {
+  await deleteE2EUsers();
+});
 
 test.describe("persistence and offline", () => {
   test("shows Saving… then Saved once the server has committed the edit", async ({ page }) => {
@@ -24,6 +36,7 @@ test.describe("persistence and offline", () => {
     const page = await context.newPage();
     await openBoard(page);
     const url = page.url();
+    const link = await createShareLink(page, "viewer");
     await insertShape(page, "client");
     await saved(page);
 
@@ -46,7 +59,7 @@ test.describe("persistence and offline", () => {
 
     // Someone else (no local cache) sees the offline edit: it reached the server.
     const other = await (await browser.newContext()).newPage();
-    await openBoard(other, url);
+    await joinViaLink(other, link);
     await expect.poll(() => types(other)).toEqual(["arrow", "client", "database"]);
   });
 
@@ -75,16 +88,17 @@ test.describe("persistence and offline", () => {
   test("a 2,000-shape board loads in under 1.5 s", async ({ browser }) => {
     const author = await (await browser.newContext()).newPage();
     await openBoard(author);
-    const url = author.url();
     expect(await author.evaluate(() => window.__whiteboard?.seed(2000))).toBe(2000);
     await author.waitForFunction(() => window.__whiteboard?.saveState() === "saved", undefined, {
       timeout: 30_000,
     });
 
-    // A fresh browser (no local cache) opening the board.
+    // A fresh browser (no local cache), signed in, opening the board's share link.
+    const link = await createShareLink(author, "viewer");
     const reader = await (await browser.newContext()).newPage();
+    await ensureSignedIn(reader, "Reader");
     const started = Date.now();
-    await reader.goto(url);
+    await reader.goto(link);
     await reader.waitForFunction(
       () => (window.__whiteboard?.shapes().length ?? 0) === 2000,
       undefined,

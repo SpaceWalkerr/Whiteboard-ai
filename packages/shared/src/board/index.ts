@@ -1,5 +1,5 @@
 export * from "./shapes";
-export { BoardValidationError } from "./errors";
+export { BoardReadOnlyError, BoardValidationError } from "./errors";
 export {
   BoardStore,
   BOARD_SCHEMA_VERSION,
