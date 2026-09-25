@@ -9,6 +9,11 @@ import { presenceSchema } from "./presence";
  */
 export const MESSAGE_SYNC = 0;
 export const MESSAGE_AWARENESS = 1;
+/**
+ * Server → client only: "everything up to this state vector is committed to Postgres". The
+ * client compares it with its own document to know when its edits are durable ("Saved").
+ */
+export const MESSAGE_PERSISTED = 2;
 
 /**
  * Largest message a client may send. Everyday updates are tiny, but a reconnecting client
@@ -32,10 +37,14 @@ export const CLOSE_CODES = {
   invalidPayload: 1007,
   /** Client could not keep up with outgoing data; reconnect and resync. */
   slowConsumer: 1013,
+  /** The server could not load the board; retry later. */
+  internalError: 1011,
+  /** The board was deleted. Do not reconnect. */
+  boardDeleted: 4404,
 } as const;
 
-/** Board ids travel in the URL path, so keep them to a safe character set. */
-export const boardIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+/** Board ids are UUIDs (the database key); they also travel in the URL path. */
+export const boardIdSchema = z.uuid();
 
 export function roomPath(boardId: string): string {
   return `/rooms/${encodeURIComponent(boardId)}`;

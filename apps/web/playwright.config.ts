@@ -1,12 +1,19 @@
+import { existsSync, readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
 import { defineConfig, devices } from "@playwright/test";
+
+// The server persists boards, so E2E needs a real Postgres: DATABASE_URL from the environment
+// (CI) or from apps/server/.env (local development).
+const serverEnvFile = new URL("../server/.env", import.meta.url);
+const serverEnv = existsSync(serverEnvFile) ? parseEnv(readFileSync(serverEnvFile, "utf8")) : {};
+const databaseUrl = process.env.DATABASE_URL ?? serverEnv.DATABASE_URL;
 
 const API_PORT = 4000;
 const WEB_PORT = 4173;
 const isCI = Boolean(process.env.CI);
 
-// E2E runs the real server and a production build of the web app with the test-only debug
-// hooks enabled (VITE_DEBUG_TOOLS). /healthz never touches the database, and Postgres
-// connections are opened lazily, so a placeholder DATABASE_URL is enough when none is provided.
+// E2E runs the real server and a production build of the web app (with its service worker)
+// with the test-only debug hooks enabled (VITE_DEBUG_TOOLS).
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -42,8 +49,7 @@ export default defineConfig({
         NODE_ENV: "production",
         LOG_LEVEL: "warn",
         PORT: String(API_PORT),
-        DATABASE_URL:
-          process.env.DATABASE_URL ?? "postgresql://unused:unused@127.0.0.1:5432/unused",
+        ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
         // Production mode requires Redis; nothing in these tests reaches it.
         REDIS_URL: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
         CORS_ALLOWED_ORIGINS: `http://localhost:${WEB_PORT}`,

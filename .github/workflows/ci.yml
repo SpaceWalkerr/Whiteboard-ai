@@ -68,6 +68,18 @@ jobs:
     name: Playwright smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # The server persists boards, so E2E needs the same Postgres as the test job.
+      postgres:
+        image: supabase/postgres:17.6.1.175
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["54322:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -h localhost" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -76,6 +88,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm db:migrate
       - name: Resolve Playwright version
         id: pw
         run: echo "version=$(pnpm --filter @whiteboard/web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"

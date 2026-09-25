@@ -16,6 +16,7 @@ import {
 import type { ConnectionIdentity } from "./auth";
 import type { SyncMetrics } from "./metrics";
 import type { TokenBucket } from "./rateLimit";
+import type { Attribution } from "./roomPersistence";
 import type { Room, RoomMember } from "./rooms";
 
 export interface ConnectionOptions {
@@ -33,6 +34,10 @@ export class SyncConnection implements RoomMember {
   /** Set by pong; cleared by each heartbeat. A connection that misses a beat is terminated. */
   private alive = true;
   private closing = false;
+  /** Messages that arrive while the room is still loading from the database. */
+  private buffered: { data: RawData; isBinary: boolean }[] | null = [];
+  /** Set during shutdown: further edits are ignored (clients re-send them after reconnecting). */
+  private frozen = false;
 
   constructor(
     private readonly ws: WebSocket,
@@ -43,7 +48,11 @@ export class SyncConnection implements RoomMember {
 
   start(): void {
     this.ws.on("message", (data, isBinary) => {
-      this.handleMessage(data, isBinary);
+      // After shutdown begins, new edits are refused (unacknowledged; the client re-sends
+      // them after reconnecting). Anything received before then is still applied and saved.
+      if (this.frozen) return;
+      if (this.buffered) this.buffered.push({ data, isBinary });
+      else this.handleMessage(data, isBinary);
     });
     this.ws.on("pong", () => {
       this.alive = true;
@@ -56,6 +65,39 @@ export class SyncConnection implements RoomMember {
       this.options.onClose(this);
     });
 
+    void this.room.ready.then((load) => {
+      if (!load.ok) {
+        this.close(
+          load.reason === "deleted" ? CLOSE_CODES.boardDeleted : CLOSE_CODES.internalError,
+          load.reason === "deleted" ? "board deleted" : "board unavailable",
+        );
+        return;
+      }
+      this.beginSync();
+      const queued = this.buffered ?? [];
+      this.buffered = null;
+      for (const { data, isBinary } of queued) this.handleMessage(data, isBinary);
+    });
+  }
+
+  /** Who authored updates from this connection: its presence (guest id until Phase 4). */
+  attribution(): Attribution {
+    for (const [clientId, owner] of this.room.awarenessOwners) {
+      if (owner !== this) continue;
+      const state = this.room.awareness.getStates().get(clientId) as
+        { user?: { id?: unknown } } | undefined;
+      const userId = typeof state?.user?.id === "string" ? state.user.id : null;
+      return { clientId, userId: this.identity.userId ?? userId };
+    }
+    return { clientId: null, userId: this.identity.userId };
+  }
+
+  /** Stop accepting new messages from this connection (graceful shutdown). */
+  freeze(): void {
+    this.frozen = true;
+  }
+
+  private beginSync(): void {
     // Start the handshake: send our state vector so the client sends what we're missing.
     this.send(
       encodeMessage(MESSAGE_SYNC, (encoder) => {
@@ -65,6 +107,7 @@ export class SyncConnection implements RoomMember {
     const others = [...this.room.awareness.getStates().keys()];
     if (others.length > 0)
       this.send(encodeAwarenessMessage(encodeAwarenessUpdate(this.room.awareness, others)));
+    this.send(this.room.persistedMessage());
   }
 
   send(message: Uint8Array): void {

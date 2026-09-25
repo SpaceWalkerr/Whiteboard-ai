@@ -1,6 +1,7 @@
 import { EnvValidationError, loadEnv } from "@whiteboard/shared/env";
 import { serverEnvSchema, type ServerEnv } from "@whiteboard/shared/env/server";
 import { createDb } from "@whiteboard/shared/db";
+import { PgBoardRepository } from "./persistence/pgRepository";
 import { buildApp } from "./app";
 import { createOriginMatcher } from "./http/origins";
 import { closeRedis, createRedis } from "./infra/redis";
@@ -27,7 +28,7 @@ async function main(): Promise<void> {
   const env = readEnvOrExit();
   const logger = createLogger(env);
 
-  const { sql } = createDb(env.DATABASE_URL, { applicationName: "whiteboard-server" });
+  const { sql, db } = createDb(env.DATABASE_URL, { applicationName: "whiteboard-server" });
   // Redis is optional outside production for now (the env schema enforces it in production).
   const redis = env.REDIS_URL === undefined ? undefined : createRedis(env.REDIS_URL, logger);
   if (redis === undefined) logger.warn("REDIS_URL not set; running without Redis");
@@ -59,13 +60,21 @@ async function main(): Promise<void> {
       bytesPerSecond: env.SYNC_BYTES_PER_SEC,
       bytesBurst: env.SYNC_BYTES_BURST,
     },
+    repository: new PgBoardRepository(db),
+    flushMs: env.SYNC_FLUSH_MS,
+    snapshotEvery: env.SNAPSHOT_EVERY_UPDATES,
   });
 
   const shutdown = createShutdown({
     logger,
     timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
     steps: [
-      { name: "websockets", run: () => sync.close() },
+      // Flush + snapshot every room first (needs the database), leaving a few seconds of the
+      // shutdown budget for closing HTTP, Redis and Postgres.
+      {
+        name: "sync",
+        run: () => sync.close(Date.now() + Math.max(1_000, env.SHUTDOWN_TIMEOUT_MS - 5_000)),
+      },
       { name: "http", run: () => app.close() },
       ...(redis ? [{ name: "redis", run: () => closeRedis(redis) }] : []),
       { name: "postgres", run: () => sql.end({ timeout: 5 }) },

@@ -8,6 +8,7 @@ export {
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_SERVER_MESSAGE_BYTES,
   MESSAGE_AWARENESS,
+  MESSAGE_PERSISTED,
   MESSAGE_SYNC,
   readAwarenessEntries,
   roomPath,
@@ -17,6 +18,7 @@ export {
 export {
   SyncProvider,
   type NetworkSignal,
+  type SaveState,
   type SyncProviderOptions,
   type SyncStatus,
   type WebSocketLike,

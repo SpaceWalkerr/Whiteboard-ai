@@ -4,8 +4,14 @@ import { SyncProvider, type Presence, type PresenceUser } from "@whiteboard/shar
 import type { BoardController } from "../controller";
 import type { Point } from "../geometry/bounds";
 import type { ViewportStore } from "../viewport/viewportStore";
+import { attachLocalCache } from "./localCache";
 import { browserNetworkSignal } from "./networkSignal";
 import { throttle, type PeersStore, type StatusStore } from "./stores";
+
+/** Keeps the board cached in IndexedDB (opens instantly and offline; offline edits survive). */
+export function useLocalCache(controller: BoardController, boardId: string): void {
+  useEffect(() => attachLocalCache(controller.store, boardId), [controller, boardId]);
+}
 
 /** Connects the board's Y.Doc to the sync server for as long as the component is mounted. */
 export function useSyncConnection(options: {
@@ -25,10 +31,11 @@ export function useSyncConnection(options: {
       network: browserNetworkSignal(),
       scheduleFlush: (flush) => requestAnimationFrame(flush),
     });
-    status.set(provider.getStatus());
-    const unsubscribe = provider.subscribe(() => {
-      status.set(provider.getStatus());
-    });
+    const publish = () => {
+      status.set({ connection: provider.getStatus(), save: provider.getSaveState() });
+    };
+    publish();
+    const unsubscribe = provider.subscribe(publish);
     return () => {
       unsubscribe();
       provider.destroy();

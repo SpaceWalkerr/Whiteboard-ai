@@ -77,8 +77,11 @@ A pre-commit hook (husky + lint-staged) lints and formats staged files.
 Click **New board** on the home page and share the URL: everyone with the link edits the same
 board live, with cursors and presence. Board state is a Yjs document
 (`packages/shared/src/board`) synced through our own WebSocket server at `/rooms/:boardId`
-(`apps/server/src/sync`, client in `packages/shared/src/sync`). Rooms live in server memory
-until persistence arrives (Phase 3). Press **?** on the board for every keyboard shortcut; **/**
+(`apps/server/src/sync`, client in `packages/shared/src/sync`). Every edit is written to
+Postgres within ~50 ms (the status turns **Saved** once it is committed); boards are also kept
+in the browser (IndexedDB) and the app is cached by a service worker, so boards open and can
+be edited offline and sync when the connection returns. See PROGRESS.md for the exact
+durability guarantee. Press **?** on the board for every keyboard shortcut; **/**
 inserts a system-design shape by name and connects it from the selected shape.
 
 Server metrics (Prometheus) are at `GET /metrics` (bearer `METRICS_TOKEN` when set).

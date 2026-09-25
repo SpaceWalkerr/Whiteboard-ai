@@ -21,13 +21,21 @@ export interface SyncServerOptions {
   rateLimit: { perSecond: number; burst: number; bytesPerSecond: number; bytesBurst: number };
   heartbeatMs?: number | undefined;
   maxBufferedBytes?: number | undefined;
-  onRoomEvict?: RoomManagerOptions["onEvict"];
+  repository: RoomManagerOptions["repository"];
+  /** Max time an update waits before being written (batching window). */
+  flushMs: number;
+  /** Compact into a snapshot after this many updates. */
+  snapshotEvery: number;
 }
 
 export interface SyncServer {
   rooms: RoomManager;
-  /** Closes every client with "service restart" (they reconnect) and stops timers. */
-  close(): Promise<void>;
+  /**
+   * Graceful shutdown: stop accepting connections and edits, flush every pending update,
+   * snapshot every active room, then close clients with "service restart" (they reconnect).
+   * Best effort until `deadline` (epoch ms).
+   */
+  close(deadline?: number): Promise<void>;
 }
 
 /**
@@ -42,8 +50,11 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     graceMs: options.roomGraceMs,
     metrics,
     logger,
-    onEvict: options.onRoomEvict,
+    repository: options.repository,
+    flushMs: options.flushMs,
+    snapshotEvery: options.snapshotEvery,
   });
+  let accepting = true;
   const connections = new Set<SyncConnection>();
 
   const reject = (socket: Duplex, status: number, reason: string, metric: string) => {
@@ -56,6 +67,10 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
       logger.debug({ err: error }, "upgrade socket error");
     });
 
+    if (!accepting) {
+      reject(socket, 503, "Service Unavailable", "shutting_down");
+      return;
+    }
     const { pathname } = new URL(request.url ?? "/", "http://localhost");
     const match = ROOM_PATH.exec(pathname);
     if (!match) {
@@ -128,8 +143,11 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
 
   return {
     rooms,
-    close: async () => {
+    close: async (deadline = Date.now() + 20_000) => {
+      accepting = false;
       clearInterval(heartbeat);
+      for (const connection of connections) connection.freeze();
+      await rooms.flushAll(deadline);
       for (const connection of connections)
         connection.close(CLOSE_CODES.serviceRestart, "server restarting");
       await new Promise<void>((resolve) => {

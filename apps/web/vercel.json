@@ -4,5 +4,11 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/((?!assets/)[^.]*)", "destination": "/index.html" }]
+  "rewrites": [{ "source": "/((?!assets/)[^.]*)", "destination": "/index.html" }],
+  "headers": [
+    {
+      "source": "/(sw.js|registerSW.js)",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+    }
+  ]
 }

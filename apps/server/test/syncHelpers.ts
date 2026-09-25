@@ -7,6 +7,8 @@ import type { App } from "../src/app";
 import { allowAllConnections, type AuthorizeConnection } from "../src/sync/auth";
 import { createSyncMetrics, type SyncMetrics } from "../src/sync/metrics";
 import { attachSyncServer, type SyncServer } from "../src/sync/upgrade";
+import { MemoryBoardRepository } from "../src/persistence/memoryRepository";
+import type { BoardRepository } from "../src/persistence/repository";
 import { silentLogger, testApp } from "./helpers";
 
 export const ORIGIN = "http://localhost:5173";
@@ -31,6 +33,9 @@ export async function startServer(
     bytesBurst?: number;
     authorize?: AuthorizeConnection;
     metricsToken?: string;
+    repository?: BoardRepository;
+    flushMs?: number;
+    snapshotEvery?: number;
   } = {},
 ): Promise<TestServer> {
   const metrics = createSyncMetrics();
@@ -47,6 +52,9 @@ export async function startServer(
       bytesPerSecond: options.bytesPerSecond ?? 64 * 1024 * 1024,
       bytesBurst: options.bytesBurst ?? 64 * 1024 * 1024,
     },
+    repository: options.repository ?? new MemoryBoardRepository(),
+    flushMs: options.flushMs ?? 5,
+    snapshotEvery: options.snapshotEvery ?? 500,
   });
   await app.listen({ host: "127.0.0.1", port: options.port ?? 0 });
   const { port } = app.server.address() as AddressInfo;
@@ -80,7 +88,13 @@ export function connectClient(wsUrl: string, boardId: string): TestClient {
     boardId,
     doc,
     awareness,
-    createSocket: (url) => new WebSocket(url, { origin: ORIGIN }) as unknown as WebSocketLike,
+    createSocket: (url) => {
+      const ws = new WebSocket(url, { origin: ORIGIN });
+      // Node's `ws` emits an error when closed mid-handshake; browsers don't. The provider
+      // handles reconnects via onclose, so the event itself needs no handling.
+      ws.on("error", () => undefined);
+      return ws as unknown as WebSocketLike;
+    },
     network: null,
     backoff: { initialMs: 20, maxMs: 200 },
     scheduleFlush: (flush) => {
@@ -135,7 +149,10 @@ export function upgradeStatus(wsUrl: string, path: string, origin?: string): Pro
 }
 
 /** Opens a raw socket to a room and resolves with the close code once the server closes it. */
-export function rawSocket(wsUrl: string, boardId: string): Promise<WebSocket> {
+export function rawSocket(
+  wsUrl: string,
+  boardId: string = crypto.randomUUID(),
+): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`${wsUrl}/rooms/${boardId}`, { origin: ORIGIN });
     ws.on("open", () => {

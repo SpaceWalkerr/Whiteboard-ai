@@ -14,6 +14,7 @@ import {
   encodeMessage,
   MAX_SERVER_MESSAGE_BYTES,
   MESSAGE_AWARENESS,
+  MESSAGE_PERSISTED,
   MESSAGE_SYNC,
   readAwarenessEntries,
   roomPath,
@@ -21,6 +22,9 @@ import {
 } from "./protocol";
 
 export type SyncStatus = "connecting" | "connected" | "reconnecting" | "offline";
+
+/** "saved" once the server confirms every edit in this document is committed to its database. */
+export type SaveState = "saved" | "saving";
 
 /** The subset of the browser WebSocket API the provider uses (the `ws` package matches it). */
 export interface WebSocketLike {
@@ -76,6 +80,9 @@ export class SyncProvider {
   private pending: Uint8Array[] = [];
   private flushScheduled = false;
   private hasConnected = false;
+  /** Latest server acknowledgement: what is durable, per Yjs client id. */
+  private persisted = new Map<number, number>();
+  private saveState: SaveState = "saved";
   private readonly unsubscribeNetwork: () => void;
   private readonly createSocket: (url: string) => WebSocketLike;
   private readonly scheduleFlush: (flush: () => void) => void;
@@ -94,6 +101,7 @@ export class SyncProvider {
     this.random = options.random ?? Math.random;
 
     options.doc.on("update", this.handleDocUpdate);
+    this.recomputeSaveState();
     options.awareness.on("update", this.handleAwarenessUpdate);
 
     const network = options.network;
@@ -109,6 +117,8 @@ export class SyncProvider {
   }
 
   getStatus = (): SyncStatus => this.status;
+
+  getSaveState = (): SaveState => this.saveState;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -203,6 +213,9 @@ export class SyncProvider {
         encoding.writeVarUint(encoder, MESSAGE_SYNC);
         syncProtocol.readSyncMessage(decoder, encoder, this.options.doc, this);
         if (encoding.length(encoder) > 1) this.sendNow(encoding.toUint8Array(encoder));
+      } else if (type === MESSAGE_PERSISTED) {
+        this.persisted = Y.decodeStateVector(decoding.readVarUint8Array(decoder));
+        this.recomputeSaveState();
       } else if (type === MESSAGE_AWARENESS) {
         const update = decoding.readVarUint8Array(decoder);
         if (readAwarenessEntries(update) !== null)
@@ -215,6 +228,7 @@ export class SyncProvider {
   }
 
   private readonly handleDocUpdate = (update: Uint8Array, origin: unknown): void => {
+    this.recomputeSaveState();
     if (origin === this) return;
     if (this.status !== "connected") return; // Delivered by the sync step on reconnect.
     this.pending.push(update);
@@ -299,6 +313,22 @@ export class SyncProvider {
     const { awareness, doc } = this.options;
     const remote = [...awareness.getStates().keys()].filter((id) => id !== doc.clientID);
     if (remote.length > 0) removeAwarenessStates(awareness, remote, this);
+  }
+
+  /** Saved when the server's durable state vector covers everything in our document. */
+  private recomputeSaveState(): void {
+    const local = Y.decodeStateVector(Y.encodeStateVector(this.options.doc));
+    let saved = true;
+    for (const [client, clock] of local) {
+      if ((this.persisted.get(client) ?? 0) < clock) {
+        saved = false;
+        break;
+      }
+    }
+    const next: SaveState = saved ? "saved" : "saving";
+    if (next === this.saveState) return;
+    this.saveState = next;
+    for (const listener of this.listeners) listener();
   }
 
   private setStatus(status: SyncStatus): void {

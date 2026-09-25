@@ -16,9 +16,14 @@ import { useClipboard } from "./keyboard/useClipboard";
 import { shapeText } from "./model/defaults";
 import { loadGuest, saveGuest } from "./sync/guestIdentity";
 import { PeersStore, StatusStore } from "./sync/stores";
-import { useFollow, usePresencePublisher, useSyncConnection } from "./sync/useBoardSync";
+import {
+  useFollow,
+  useLocalCache,
+  usePresencePublisher,
+  useSyncConnection,
+} from "./sync/useBoardSync";
 import { BoardContextMenu } from "./ui/BoardContextMenu";
-import { ConnectionStatus } from "./ui/ConnectionStatus";
+import { ConnectionStatus, OfflineBanner } from "./ui/ConnectionStatus";
 import { IconButton } from "./ui/IconButton";
 import { PresenceAvatars } from "./ui/PresenceAvatars";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
@@ -81,6 +86,7 @@ interface BoardPageProps {
 export function BoardPage({ boardId, serverUrl, debugTools }: BoardPageProps) {
   const [me, setMe] = useState(loadGuest);
   const [session] = useState(() => createSession(me.id));
+  useLocalCache(session.controller, boardId);
   useSyncConnection({
     serverUrl,
     boardId,
@@ -92,7 +98,8 @@ export function BoardPage({ boardId, serverUrl, debugTools }: BoardPageProps) {
     () =>
       debugTools
         ? installDebugTools(session.controller, session.viewport, {
-            status: session.status.get,
+            status: () => session.status.get().connection,
+            saveState: () => session.status.get().save,
             peers: () => session.peers.get().map((p) => p.presence),
             me: () => me,
           })
@@ -263,11 +270,10 @@ function BoardView({
           <h1 className="text-sm font-semibold">
             Board <span className="font-normal text-muted-foreground">{boardId.slice(0, 8)}</span>
           </h1>
-          <span className="text-xs text-muted-foreground">Not saved yet</span>
         </header>
 
         <div className="absolute top-3 right-3 z-20 flex items-center gap-3 rounded-lg border bg-background py-1 pr-1 pl-3 shadow-sm">
-          <ConnectionStatus status={status} />
+          <ConnectionStatus state={status} />
           <PresenceAvatars
             me={me}
             peers={peers}
@@ -282,6 +288,8 @@ function BoardView({
             <Link2 />
           </IconButton>
         </div>
+
+        <OfflineBanner state={status} />
 
         {followed && (
           <div

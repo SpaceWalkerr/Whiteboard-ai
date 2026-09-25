@@ -6,7 +6,7 @@ import { BoardStore } from "@whiteboard/shared/board";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { loadGuest, PRESENCE_COLORS, randomGuest } from "../sync/guestIdentity";
 import { PeersStore, throttle } from "../sync/stores";
-import { ConnectionStatus } from "../ui/ConnectionStatus";
+import { ConnectionStatus, OfflineBanner } from "../ui/ConnectionStatus";
 import { PresenceAvatars } from "../ui/PresenceAvatars";
 
 const me = { id: "guest-me", name: "Quiet Gecko", color: "#1d4ed8" };
@@ -79,10 +79,29 @@ describe("PeersStore", () => {
 
 describe("presence UI", () => {
   it("announces the connection status in words", () => {
-    const { rerender } = render(<ConnectionStatus status="connected" />);
-    expect(screen.getByRole("status")).toHaveTextContent("Live");
-    rerender(<ConnectionStatus status="reconnecting" />);
+    const { rerender } = render(
+      <ConnectionStatus state={{ connection: "connected", save: "saved" }} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Saved");
+    rerender(<ConnectionStatus state={{ connection: "connected", save: "saving" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Saving…");
+    rerender(<ConnectionStatus state={{ connection: "reconnecting", save: "saving" }} />);
     expect(screen.getByRole("status")).toHaveTextContent("Reconnecting…");
+  });
+
+  it("shows the offline banner only when edits can't reach the server", () => {
+    const { rerender } = render(
+      <OfflineBanner state={{ connection: "connected", save: "saving" }} />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    rerender(<OfflineBanner state={{ connection: "offline", save: "saved" }} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You're offline — changes are saved on this device",
+    );
+    rerender(<OfflineBanner state={{ connection: "reconnecting", save: "saving" }} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Connection lost");
+    rerender(<OfflineBanner state={{ connection: "reconnecting", save: "saved" }} />);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("follows someone when their avatar is clicked, and lets me rename myself", async () => {

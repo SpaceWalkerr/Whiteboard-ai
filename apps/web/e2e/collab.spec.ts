@@ -49,15 +49,17 @@ test.describe("real-time collaboration", () => {
     await expect(a.locator(`[data-remote-cursor="${nameB}"]`)).toBeVisible();
     await expect(b.getByRole("button", { name: `Follow ${nameA}` })).toBeVisible();
 
-    // The avatar shows the connection is live.
-    await expect(a.getByRole("status").filter({ hasText: "Live" })).toBeVisible();
+    // The status shows the connection is live and everything is saved.
+    await expect(a.locator('[data-sync-status="connected"]')).toBeVisible();
   });
 
   test("edits made while offline merge when the connection returns", async ({ browser }) => {
     const { a, b } = await twoUsers(browser);
 
     await a.context().setOffline(true);
-    await expect(a.getByText("Offline — changes will sync when you reconnect")).toBeVisible();
+    await expect(a.getByRole("alert")).toContainText(
+      "You're offline — changes are saved on this device",
+    );
 
     await insertShape(a, "cache");
     await insertShape(b, "database");

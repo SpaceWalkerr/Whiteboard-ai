@@ -2,8 +2,8 @@
 
 ## Current phase
 
-Phase 2 — Real-time sync server: implemented, awaiting manual verification.
-(Phase 0 committed; Phase 1 not yet committed.)
+Phase 3 — Persistence + offline: implemented, awaiting manual verification.
+(Phases 0–2 committed.)
 
 ## Done
 
@@ -107,6 +107,42 @@ Phase 2 — Real-time sync server: implemented, awaiting manual verification.
 - Verified by hand: two tabs on one board (live edits, cursor, selection outline); stopping the
   server shows "Reconnecting…", restarting it recovers both tabs with the board intact.
 
+### Phase 3 — Persistence + offline
+
+- Migration `0001_boards_and_history`: `boards`, `board_updates` (write-ahead log),
+  `board_snapshots` (every snapshot kept), `board_update_archive` (compacted history). RLS on
+  all (the RLS guard test covers them). Board ids are UUIDs.
+- Server: `PgBoardRepository` (load / append / compact, each one transaction) behind a
+  `BoardRepository` interface (in-memory double for fast tests). Each room loads snapshot +
+  later updates before answering any client; `RoomPersistence` batches every applied update
+  into board_updates (≤ `SYNC_FLUSH_MS`=50 ms or 500 updates per INSERT), acknowledges with a
+  new `persisted` message only after commit, retries failed writes with backoff, and compacts
+  after `SNAPSHOT_EVERY_UPDATES`=500 updates, on eviction and on shutdown. Updates record the
+  sender's Yjs client id and (guest) user id.
+- Graceful shutdown (SIGTERM): stop accepting upgrades (503) and new messages → wait for rooms
+  still loading → flush every room (retrying until the deadline) → snapshot → send final
+  acknowledgements → close sockets 1012 → close HTTP/Redis/Postgres.
+- Metrics: `sync_pending_updates`, `sync_flush_seconds`, `sync_room_load_seconds`,
+  `sync_persist_failures_total`, `sync_compactions_total`.
+- Web: y-indexeddb local copy per board (opens instantly and offline; offline edits survive
+  closing the tab); service worker (vite-plugin-pwa/Workbox) precaching only the app shell so
+  a board opens with no network; status "Saving… / Saved / Reconnecting… / Offline" driven by
+  server acknowledgements; offline banner ("You're offline — changes are saved on this device
+  and will sync when you reconnect"; also shown while reconnecting with unsaved changes).
+- Tests: server 54 (persistence with in-memory repo: ack-after-commit, outage → no ack → retry,
+  batching, reload after restart, eviction snapshot, threshold compaction with contiguous
+  history, shutdown flush, deleted board 4404, load failure 1011; real Postgres: 10,000 updates →
+  compaction → reload equals the original and all 10,000 are archived; snapshot + tail load;
+  2,000-shape cold load; real-process `kill -9` crash test; real-process SIGTERM test). Web 86
+  (+ IndexedDB cache with fake-indexeddb, save/offline UI). Playwright 14 (+ Saved indicator,
+  offline edit → close tab → reopen online → visible to another browser, open board with no
+  network via service worker, 2,000-shape load time).
+- Measured (dev Mac in India → Supabase ap-southeast-1): cold load of a 2,000-shape board from
+  Postgres **~850–900 ms** (server test); open-and-draw in a fresh browser **~580–610 ms**
+  (Playwright, room already in server memory); compaction of that board ~2 s (background).
+- Crash test result: 200/200 acknowledged edits recovered after `kill -9`; the 100 edits sent in
+  the last few ms (unacknowledged, sender also gone) were not — as the guarantee allows.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -186,6 +222,37 @@ Phase 2 — Real-time sync server: implemented, awaiting manual verification.
 - **Web depends on the Awareness class only**; Yjs itself stays behind `BoardStore`, so there
   is exactly one `yjs` copy in the bundle (two copies break Yjs).
 
+- **Durability guarantee (Phase 3).** Every update the server applies is appended to
+  `board_updates` within `SYNC_FLUSH_MS` (50 ms), in order. A client is told its edits are
+  durable (status **Saved**) only by a `persisted` message sent **after** the batch commits;
+  it carries the state vector captured when the batch was cut, i.e. exactly what is now in
+  Postgres. Therefore: **an edit shown as Saved survives any server failure, including
+  kill -9** (verified by the crash test). An edit not yet Saved lives in the editor's browser
+  (memory + IndexedDB) and in any peer that received it; it is re-sent automatically on
+  reconnect (Yjs sync step), so it is lost only if the server dies within ~50 ms of receiving
+  it _and_ every browser holding it loses its local storage before reconnecting. Live
+  collaboration is not delayed by the database: updates are broadcast to peers immediately
+  and only the durability acknowledgement waits for the commit.
+- **History retention for replay (Phase 8): archive + all snapshots.** Compaction moves updates
+  into `board_update_archive` (same row: seq, update, client id, user id, timestamp) in the
+  same transaction that writes the snapshot, and snapshots are never deleted. Replay can seek
+  to the nearest snapshot and play archived updates forward, with per-edit authorship and
+  time. Periodic snapshots alone would lose everything between two snapshots (a scrubber needs
+  every step). Yjs updates are small; storage/retention limits per plan are a Phase 10 concern.
+- **Board row is created with the first saved update**, so opening random URLs stores nothing.
+- **Compaction reads from the database, not memory**, inside one transaction that locks the
+  board row (`SELECT … FOR UPDATE`), so it is exact and safe with multiple instances later.
+  It is an optimisation: a failed compaction leaves updates safely in `board_updates`.
+- **Eviction never drops unsaved edits**: if the final flush fails, the room stays in memory
+  and eviction is retried.
+- **Messages received while a room is loading are buffered and applied**, even if the client
+  disconnects or shutdown starts meanwhile (found by the SIGTERM test).
+- **Service worker caches only built files** (HTML/JS/CSS/SVG, network-first navigation via
+  fallback); API and sync traffic are never cached. `sw.js` is served `no-cache` on Vercel.
+  New dependency `vite-plugin-pwa` (approved).
+- **Drizzle query helpers are re-exported from `@whiteboard/shared/db`**: pnpm resolved a second
+  `drizzle-orm` copy for the server (different optional peers), which broke types.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -209,11 +276,17 @@ Phase 2 — Real-time sync server: implemented, awaiting manual verification.
   is not run in CI (shared runners give meaningless frame rates).
 - Playwright's "Desktop Chrome" profile reports a Windows user agent, so on a Mac the app
   expects Ctrl shortcuts in E2E; tests use a `modKey(page)` helper.
-- Data loss on restart: if the server restarts while nobody has the board open, or everyone
-  closes it for longer than the 30 s grace period, the board is gone. Accepted for Phase 2
-  only; Phase 3 persists documents.
-- Yjs history grows with every edit (tombstones); a heavily edited board keeps growing until
-  Phase 3 adds compaction/snapshots.
+- Board content is also stored in each browser's IndexedDB (by design, for offline). On a
+  shared computer that copy stays after closing the tab; Phase 4 must clear it on sign-out.
+- E2E and persistence tests write boards to the database in `DATABASE_URL` (the dev project
+  locally). Persistence tests delete what they create; E2E boards are left (like real usage).
+- Hosted Postgres latency varies: one run saw a single compaction take 35 s (normally ~2 s) —
+  a pooler/network stall. Compaction runs in the background and doesn't block editing, but
+  watch `sync_flush_seconds` in production.
+- Sequence numbers come from an in-memory per-room counter: correct for one instance only.
+  Phase 5 must allocate them safely across instances (the PK rejects duplicates, so a clash
+  fails loudly rather than corrupting).
+- Storage growth from the history archive is unbounded for now (retention limits: Phase 10).
 - Two tabs in the same browser share one guest identity (same name), so they appear as one
   person in the avatars (cursors still show per tab).
 - `pnpm test:e2e` reuses an already-running local server on :4000 / web on :4173 (faster
@@ -221,13 +294,15 @@ Phase 2 — Real-time sync server: implemented, awaiting manual verification.
 
 ## Later
 
-- Phase 3: persist rooms in `RoomManager`'s `onEvict` hook (and periodically / before ack
-  per SPEC's zero-data-loss target); load on first join; compaction; remove "Not saved yet".
 - Phase 4: replace `allowAllConnections` in `apps/server/src/index.ts` with Supabase JWT
   verification + board role lookup (token via `Sec-WebSocket-Protocol` or first message, not
   the URL); replace guest identity with the signed-in user; drop `/board/local`.
+- Phase 4: clear IndexedDB board copies on sign-out; set `boards.owner_id`.
 - Phase 5: share rooms across instances via Redis pub/sub; `render.yaml` already says 2
-  instances.
+  instances; allocate `seq` safely across instances.
+- Phase 8: replay = nearest `board_snapshots` row + `board_update_archive`/`board_updates` rows
+  after it.
+- Phase 10: retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
 - Phase 4: Supabase Auth env vars (web: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`; server:
   JWKS URL); `trustProxy` for Render when rate limiting by IP.

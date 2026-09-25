@@ -1,5 +1,5 @@
 import { keysAbove, SYSTEM_SHAPE_TYPES, type Shape } from "@whiteboard/shared/board";
-import type { Presence, PresenceUser, SyncStatus } from "@whiteboard/shared/sync";
+import type { Presence, PresenceUser, SaveState, SyncStatus } from "@whiteboard/shared/sync";
 import type { BoardController } from "./controller";
 import { resolveArrow, type ArrowGeometry } from "./geometry/arrow";
 import { createArrowShape, createBoxShape, DEFAULT_SIZES } from "./model/defaults";
@@ -16,6 +16,7 @@ export interface WhiteboardDebug {
   selection: () => string[];
   tool: () => string;
   status: () => SyncStatus;
+  saveState: () => SaveState;
   peers: () => Presence[];
   me: () => PresenceUser;
   viewport: () => Viewport;
@@ -32,6 +33,7 @@ declare global {
 
 export interface DebugExtras {
   status: () => SyncStatus;
+  saveState: () => SaveState;
   peers: () => Presence[];
   me: () => PresenceUser;
 }

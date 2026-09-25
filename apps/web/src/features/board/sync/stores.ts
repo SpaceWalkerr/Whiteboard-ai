@@ -1,21 +1,32 @@
 import type { Awareness } from "y-protocols/awareness";
-import { presenceSchema, type Presence, type SyncStatus } from "@whiteboard/shared/sync";
+import {
+  presenceSchema,
+  type Presence,
+  type SaveState,
+  type SyncStatus,
+} from "@whiteboard/shared/sync";
 
-/** Connection status as an external store (the provider lives in an effect). */
+export interface SyncState {
+  connection: SyncStatus;
+  /** "saved" once the server confirmed every edit in this browser is in its database. */
+  save: SaveState;
+}
+
+/** Connection + save status as an external store (the provider lives in an effect). */
 export class StatusStore {
-  private status: SyncStatus = "connecting";
+  private state: SyncState = { connection: "connecting", save: "saved" };
   private readonly listeners = new Set<() => void>();
 
-  get = (): SyncStatus => this.status;
+  get = (): SyncState => this.state;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
 
-  set(status: SyncStatus): void {
-    if (status === this.status) return;
-    this.status = status;
+  set(next: SyncState): void {
+    if (next.connection === this.state.connection && next.save === this.state.save) return;
+    this.state = next;
     for (const listener of this.listeners) listener();
   }
 }

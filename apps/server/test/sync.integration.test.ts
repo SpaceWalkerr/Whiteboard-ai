@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as encoding from "lib0/encoding";
 import * as Y from "yjs";
 import {
@@ -21,6 +21,11 @@ import {
 
 let servers: TestServer[] = [];
 let clients: TestClient[] = [];
+let BOARD = crypto.randomUUID();
+
+beforeEach(() => {
+  BOARD = crypto.randomUUID();
+});
 
 async function server(options: Parameters<typeof startServer>[0] = {}) {
   const s = await startServer(options);
@@ -28,7 +33,7 @@ async function server(options: Parameters<typeof startServer>[0] = {}) {
   return s;
 }
 
-function client(wsUrl: string, boardId = "board") {
+function client(wsUrl: string, boardId = BOARD) {
   const c = connectClient(wsUrl, boardId);
   clients.push(c);
   return c;
@@ -101,7 +106,7 @@ describe("sync server", () => {
     shape(b.doc, "from-b").set("x", 2);
     await waitFor(() => b.doc.getMap("shapes").has("from-b"));
 
-    const again = connectClient(s.wsUrl, "board");
+    const again = connectClient(s.wsUrl, BOARD);
     clients.push(again);
     Y.applyUpdate(again.doc, Y.encodeStateAsUpdate(a.doc));
     await waitFor(() => sameState(again.doc, b.doc) && b.doc.getMap("shapes").has("from-a"));
@@ -113,7 +118,7 @@ describe("sync server", () => {
     const a = client(first.wsUrl);
     await waitFor(() => a.provider.getStatus() === "connected");
     shape(a.doc, "s1").set("x", 42);
-    await waitFor(() => first.sync.rooms.get("board")?.doc.getMap("shapes").has("s1") === true);
+    await waitFor(() => first.sync.rooms.get(BOARD)?.doc.getMap("shapes").has("s1") === true);
 
     await first.stop();
     servers = [];
@@ -122,7 +127,7 @@ describe("sync server", () => {
     const second = await server({ port: first.port });
     await waitFor(() => a.provider.getStatus() === "connected");
     // The empty restarted server received the document back from the client.
-    await waitFor(() => second.sync.rooms.get("board")?.doc.getMap("shapes").has("s1") === true);
+    await waitFor(() => second.sync.rooms.get(BOARD)?.doc.getMap("shapes").has("s1") === true);
     expect(a.statuses).toContain("reconnecting");
 
     const b = client(second.wsUrl);
@@ -164,8 +169,8 @@ describe("sync server", () => {
 
   it("keeps different boards separate", async () => {
     const s = await server();
-    const a = client(s.wsUrl, "one");
-    const b = client(s.wsUrl, "two");
+    const a = client(s.wsUrl, crypto.randomUUID());
+    const b = client(s.wsUrl, crypto.randomUUID());
     await waitFor(
       () => a.provider.getStatus() === "connected" && b.provider.getStatus() === "connected",
     );
@@ -185,7 +190,7 @@ describe("sync server", () => {
 
   it("closes connections that send oversized messages (1009)", async () => {
     const s = await server();
-    const ws = await rawSocket(s.wsUrl, "board");
+    const ws = await rawSocket(s.wsUrl, BOARD);
     const closed = closeCode(ws);
     ws.send(new Uint8Array(MAX_CLIENT_MESSAGE_BYTES + 10));
     expect(await closed).toBe(CLOSE_CODES.tooBig);
@@ -193,7 +198,7 @@ describe("sync server", () => {
 
   it("closes connections that exceed the byte budget (1008)", async () => {
     const s = await server({ bytesPerSecond: 1024, bytesBurst: 4096 });
-    const ws = await rawSocket(s.wsUrl, "board");
+    const ws = await rawSocket(s.wsUrl, BOARD);
     const closed = closeCode(ws);
     // A valid (empty) update padded past the budget: rejected before it is even parsed.
     ws.send(new Uint8Array(8192));
@@ -210,7 +215,7 @@ describe("sync server", () => {
       shape(a.doc, `shape-${i}`).set("label", `Service number ${i} `.repeat(20));
     expect(Y.encodeStateAsUpdate(a.doc).byteLength).toBeGreaterThan(1024 * 1024);
 
-    const again = connectClient(s.wsUrl, "board");
+    const again = connectClient(s.wsUrl, BOARD);
     clients.push(again);
     Y.applyUpdate(again.doc, Y.encodeStateAsUpdate(a.doc));
     const b = client(s.wsUrl);
@@ -219,7 +224,7 @@ describe("sync server", () => {
 
   it("closes connections that exceed the rate limit (1008)", async () => {
     const s = await server({ perSecond: 5, burst: 10 });
-    const ws = await rawSocket(s.wsUrl, "board");
+    const ws = await rawSocket(s.wsUrl, BOARD);
     const closed = closeCode(ws);
     const step1 = encodeMessage(MESSAGE_SYNC, (encoder) => {
       encoding.writeVarUint(encoder, 0);
@@ -231,7 +236,7 @@ describe("sync server", () => {
 
   it("closes connections that send malformed messages (1007)", async () => {
     const s = await server();
-    const ws = await rawSocket(s.wsUrl, "board");
+    const ws = await rawSocket(s.wsUrl, BOARD);
     const closed = closeCode(ws);
     ws.send(new Uint8Array([9, 9, 9]));
     expect(await closed).toBe(CLOSE_CODES.invalidPayload);
@@ -262,7 +267,7 @@ describe("sync server", () => {
       selection: [],
       viewport: null,
     });
-    const ws = await rawSocket(s.wsUrl, "board");
+    const ws = await rawSocket(s.wsUrl, BOARD);
     ws.send(encodeAwarenessMessage(encodeAwarenessUpdate(forger, [a.doc.clientID])));
     await new Promise((resolve) => setTimeout(resolve, 100));
     const seen = b.awareness.getStates().get(a.doc.clientID) as
@@ -276,7 +281,7 @@ describe("sync server", () => {
     const a = client(s.wsUrl);
     await waitFor(() => a.provider.getStatus() === "connected");
     shape(a.doc, "s1").set("x", 1);
-    await waitFor(() => s.sync.rooms.get("board")?.doc.getMap("shapes").has("s1") === true);
+    await waitFor(() => s.sync.rooms.get(BOARD)?.doc.getMap("shapes").has("s1") === true);
 
     expect((await fetch(`${s.httpUrl}/metrics`)).status).toBe(401);
     const res = await fetch(`${s.httpUrl}/metrics`, {

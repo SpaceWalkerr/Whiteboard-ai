@@ -51,8 +51,9 @@ describe("backoffDelay", () => {
 });
 
 describe("boardIdSchema", () => {
-  it("accepts url-safe ids and rejects anything else", () => {
-    expect(boardIdSchema.safeParse("3f2a-b_C9").success).toBe(true);
+  it("accepts UUIDs and rejects anything else", () => {
+    expect(boardIdSchema.safeParse("20f9d63e-ea39-4eb7-8aaa-0f60d657d603").success).toBe(true);
+    expect(boardIdSchema.safeParse("3f2a-b_C9").success).toBe(false);
     expect(boardIdSchema.safeParse("../etc").success).toBe(false);
     expect(boardIdSchema.safeParse("").success).toBe(false);
   });
