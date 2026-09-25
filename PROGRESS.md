@@ -2,8 +2,8 @@
 
 ## Current phase
 
-Phase 5 — Horizontal scaling + load testing: implemented, awaiting manual verification.
-Phases 0–4 committed.
+Phase 6 — Typed graph + deterministic rules engine: implemented, awaiting manual verification.
+Phases 0–5 committed.
 
 ## Done
 
@@ -273,6 +273,59 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   round-robined across both instances by nginx; 6 boards had live clients on both instances
   during the run, 0 server errors.
 
+### Phase 6 — Typed graph + rules engine (no AI)
+
+- **`packages/graph`** (pure TypeScript, no I/O, no Yjs):
+  - `extractGraph(shapes: Iterable<unknown>)` → `{ nodes, edges, ignored }`. Every record is
+    validated with the board's `shapeSchema`; anything that isn't a graph element is reported in
+    `ignored` with a reason (`not_a_component`, `invalid`, `duplicate_id`, `dangling_arrow`,
+    `arrow_to_non_component`), never thrown. Nodes carry `kind`, `label` (the kind's name when
+    unlabeled, plus `props.unlabeled`), `props.instances`, `groupId`, database
+    `engine`/`role`, queue `mode`. Edges carry `arrowId` (the canvas arrow), `edgeType`, `label`.
+  - Arrows bound to a plain shape inside a group (a frame around components) resolve to the
+    group's components, one edge each (`id = arrowId:from->to` when an arrow fans out).
+    Self-pairs produced only by that fan-out are dropped; a self-loop drawn on one component
+    is kept.
+  - Instance count: same kind + same label apart from a trailing number ("Order service 1/2",
+    "#2", "instance 2"), or an explicit count ("API ×3", "x3", "3x", "3 instances/replicas/pods").
+  - Zod schemas + types for the graph and findings (`designGraphSchema`, `findingSchema`) —
+    the single definition the web app uses now and the AI boundary will validate against.
+  - Rules engine: each rule is `{ id, description, check(ctx) → Finding[] }` over a shared
+    `GraphIndex` (adjacency, islands, reachability, iterative Tarjan SCC, longest path over
+    the SCC condensation). `runRules` isolates a throwing rule (`ruleErrors`), de-duplicates by
+    stable finding id (`ruleId:sorted shape ids`) and sorts by severity → rule → board
+    position. `checkDesign(shapes, { maxSyncDepth })` does both steps.
+  - Rules: `db-spof` (critical), `client-direct-db` (critical), `sync-cycle` (critical),
+    `no-load-balancer`, `read-path-no-cache`, `deep-sync-chain` (> `maxSyncDepth` = 3
+    service/worker/external-API hops), `queue-no-dlq`, `storage-no-cdn` (warning; info when
+    storage is reached only indirectly), `disconnected` (info). Each finding has a title,
+    explanation, suggestion and the shape ids (components and arrows) to highlight.
+- **Web:**
+  - "Check design" button in the board header + `Shift+C` (listed in the "?" sheet under
+    Review). Runs in the browser on the current snapshot; nothing is written to the board or
+    sent to the server, so viewers can use it too.
+  - Findings panel (right side; the properties panel moves beside it): findings grouped by
+    severity with icon + text badge, explanation and "Fix:"; summary line; live-region
+    announcement; "N shapes not checked" list with reasons; "The board changed since this
+    check" + Re-check when stale; focus moves to the panel on open, Escape closes it and returns
+    focus to the button.
+  - Clicking a finding (or a not-checked shape) outlines its shapes in the severity colour on a
+    separate highlight layer (not the selection, not broadcast to others) and zooms to fit them
+    in the free area (max 125%). A fixed finding's highlight disappears on re-check.
+  - Debug hook: `designCheck()` / `designCheckFocus()` for E2E.
+- **Tests:** graph 80 (extraction incl. groups, dangling/missing/invalid/duplicate, instance
+  conventions; a positive and a negative fixture board for every rule, 33 fixtures, asserting
+  exact severity + shape ids; a healthy reference design with zero findings; engine
+  ordering/isolation/dedupe/`maxSyncDepth`/cycles; the acceptance scenario; fast-check
+  property tests — 500 random boards each with corrupt records and arbitrary values:
+  `extractGraph` and every rule never throw, edges only join nodes, every record is accounted
+  for, every finding's shapes exist; 2,000-shape performance bound). Web 100 (+14: store,
+  staleness, highlight kept/dropped on re-check, panel rendering/keyboard/Escape/empty/not
+  checked/stale, `zoomToShapes`, shortcut). Playwright 18 (+1 `check.spec.ts`: draw service →
+  DB, Check design → critical SPOF, click → DB highlighted and zoomed to; add replica + set
+  Replica role + Replication arrow → stale notice → Re-check → finding gone; Escape/Shift+C).
+- **Measured:** `checkDesign` on a 2,000-shape board ≈ 17 ms (dev Mac, Node).
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -447,6 +500,26 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
 - **`TEST_REDIS_URL` (not `REDIS_URL`) for tests**, failing loudly when missing — like the
   RLS test with `DATABASE_URL` — so `pnpm dev` stays Redis-free.
 
+- **Phase 6 decisions (approved plan):**
+  - `extractGraph` takes shape records (`unknown`), not a Y.Doc: keeps the package Yjs-free and
+    lets the server pass `doc.getMap("shapes").toJSON()` values later.
+  - No instance-count field on shapes: instances are read from label conventions (same label
+    - trailing number, or "×N"). No schema change this phase.
+  - Plain rectangles/ellipses are never typed from their labels ("Postgres" in a rectangle is
+    reported as not checked). Deterministic and explainable; label guessing is left to later.
+  - Keyword rules (read path, DLQ, static content) only fire on a clear label signal, so
+    unlabeled boards get fewer findings rather than noisy guesses.
+  - `deep-sync-chain` counts only service/worker/external-API hops (client → LB → gateway →
+    service → DB is normal); cycles count as one step (they have their own rule).
+  - A replica counts for `db-spof` only when linked to the primary (replica-role database by
+    any arrow, or any database by a replication arrow).
+  - Graph/finding zod schemas live in `packages/graph` (the owner), not `packages/shared`:
+    both apps import them from one place, so nothing is duplicated.
+  - Checks run on demand, not live: the panel marks results stale instead.
+  - New dev dependency `fast-check` 4.10.2 (approved) for the property tests.
+  - `shapeTypeLabel` moved from `PropertiesPanel` to `model/systemShapes.ts` (now shared by the
+    findings panel).
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -527,6 +600,17 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
 - The load-test seed writes real users/boards to the database in `DATABASE_URL`; run
   `pnpm load:seed cleanup` afterwards (it refuses outside development/test).
 
+- **Phase 6:** the "S3"-style labels lose their trailing digit when grouping instances
+  ("S3" and "S4" of the same kind would count as 2 instances of "s"). Only the load-balancer
+  rule uses instance counts, and only for services.
+- The design check only understands palette shapes; boards drawn with plain rectangles get
+  "N shapes not checked" and few findings.
+- `storage-no-cdn` reports storage reached only through a service (e.g. uploads) as info,
+  which can be a false positive when files are never served to users.
+- The highlight survives edits until re-check or close; highlighted shapes that were deleted
+  are simply not drawn.
+- The design check has no server-side use yet (Phase 7 feeds it to the AI review).
+
 ## Later
 
 - Phase 13: re-run the load tests against Render staging (2 instances + Key Value next to
@@ -541,6 +625,12 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   after it.
 - Phase 10: retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
+- Phase 7: run the rules on the server over `doc.getMap("shapes").toJSON()` and send the graph +
+  rule findings to Claude as grounding; validate Claude's findings with `findingSchema`; live
+  rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside live AI hints.
+- Unscheduled: an explicit `instances` field on service shapes in the properties panel;
+  guessing kinds for plain shapes from labels ("Redis" rectangle → cache), probably via AI;
+  per-board rule settings (disable a rule, `maxSyncDepth`).
 - Phase 10: team organizations (members, admins), ownership transfer, per-plan limits.
 - Phase 13: Render Cron Job calling `POST /internal/purge-trash` daily with `CRON_SECRET`;
   set `TRUST_PROXY=1` on Render so rate limits see real client IPs.

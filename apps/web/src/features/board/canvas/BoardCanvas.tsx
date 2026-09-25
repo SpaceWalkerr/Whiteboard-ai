@@ -16,7 +16,7 @@ import {
 } from "../viewport/viewport";
 import type { ViewportStore } from "../viewport/viewportStore";
 import { Grid } from "./Grid";
-import { Overlay, type RemoteSelection } from "./Overlay";
+import { Overlay, type CanvasHighlight, type RemoteSelection } from "./Overlay";
 import { ShapeNode } from "./ShapeNode";
 
 interface BoardCanvasProps {
@@ -29,6 +29,8 @@ interface BoardCanvasProps {
   onPointerLeave?: () => void;
   /** Other users' selections, outlined in their colour. */
   remoteSelections?: readonly RemoteSelection[];
+  /** Shapes of the design-check finding being looked at. */
+  highlight?: CanvasHighlight | null;
   spacePressed: boolean;
   children?: ReactNode;
 }
@@ -64,6 +66,7 @@ export function BoardCanvas({
   onPointerWorld,
   onPointerLeave,
   remoteSelections = [],
+  highlight = null,
   spacePressed,
   children,
 }: BoardCanvasProps) {
@@ -252,6 +255,7 @@ export function BoardCanvas({
             viewport={vp}
             stageRef={stageRef}
             remoteSelections={remoteSelections}
+            highlight={highlight}
           />
         </Layer>
       </Stage>

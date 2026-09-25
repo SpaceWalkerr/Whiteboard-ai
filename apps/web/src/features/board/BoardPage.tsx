@@ -1,5 +1,5 @@
-import { ArrowLeft, Users } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { ArrowLeft, ClipboardCheck, Users } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { Awareness } from "y-protocols/awareness";
 import { BoardHistory, BoardStore, type SystemShapeType } from "@whiteboard/shared/board";
@@ -12,6 +12,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AccessLostOverlay, BoardTitle } from "./ui/BoardHeader";
 import { ShareDialog } from "./ui/ShareDialog";
 import { BoardCanvas } from "./canvas/BoardCanvas";
+import { DesignCheckStore, type CheckFocus } from "./check/DesignCheckStore";
+import { SEVERITY_META } from "./check/severity";
 import { TextEditor } from "./canvas/TextEditor";
 import { BoardController } from "./controller";
 import { installDebugTools } from "./debug";
@@ -30,6 +32,7 @@ import {
 } from "./sync/useBoardSync";
 import { BoardContextMenu } from "./ui/BoardContextMenu";
 import { ConnectionStatus, OfflineBanner } from "./ui/ConnectionStatus";
+import { FindingsPanel } from "./ui/FindingsPanel";
 import { PresenceAvatars } from "./ui/PresenceAvatars";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
 import { QuickInsertDialog } from "./ui/QuickInsertDialog";
@@ -38,7 +41,12 @@ import { ShapePalette } from "./ui/ShapePalette";
 import { ShortcutsDialog } from "./ui/ShortcutsDialog";
 import { Toolbar } from "./ui/Toolbar";
 import { ZoomControls } from "./ui/ZoomControls";
-import { ensureVisible, viewportCenterWorld } from "./viewport/zoomActions";
+import {
+  ensureVisible,
+  PANEL_INSETS,
+  viewportCenterWorld,
+  zoomToShapes,
+} from "./viewport/zoomActions";
 import { ViewportStore } from "./viewport/viewportStore";
 
 interface BoardSession {
@@ -49,7 +57,13 @@ interface BoardSession {
   status: StatusStore;
   peers: PeersStore;
   role: RoleStore;
+  check: DesignCheckStore;
 }
+
+/** Screen area the findings panel (w-80 + margins) covers on the right… */
+const FINDINGS_INSETS = { ...PANEL_INSETS, right: 350 };
+/** …and with the properties panel (w-64) open beside it. */
+const FINDINGS_AND_PROPERTIES_INSETS = { ...PANEL_INSETS, right: 630 };
 
 function createSession(userId: string, role: BoardRole): BoardSession {
   const store = new BoardStore({ userId });
@@ -69,6 +83,7 @@ function createSession(userId: string, role: BoardRole): BoardSession {
     status: new StatusStore(),
     peers: new PeersStore(awareness),
     role: new RoleStore(role),
+    check: new DesignCheckStore(store),
   };
 }
 
@@ -159,6 +174,8 @@ export function BoardPage({
             saveState: () => session.status.get().save,
             peers: () => session.peers.get().map((p) => p.presence),
             me: () => me,
+            designCheck: () => session.check.get().result,
+            designCheckFocus: () => session.check.get().focus?.shapeIds ?? null,
           })
         : undefined,
     [session, debugTools, me],
@@ -208,6 +225,38 @@ function BoardView({
   const [insertOpen, setInsertOpen] = useState(false);
   const pointerWorld = useRef<{ x: number; y: number } | null>(null);
   const ui = useSyncExternalStore(controller.subscribeUi, controller.getUi);
+  const checkState = useSyncExternalStore(session.check.subscribe, session.check.get);
+  const checkButtonRef = useRef<HTMLButtonElement>(null);
+  const runCheck = useCallback(() => {
+    session.check.run();
+  }, [session]);
+  const closeCheck = useCallback(() => {
+    session.check.close();
+    checkButtonRef.current?.focus();
+  }, [session]);
+  const focusFinding = useCallback(
+    (focus: CheckFocus) => {
+      session.check.setFocus(focus);
+      const propertiesOpen = !controller.readOnly && controller.getUi().selectedIds.size > 0;
+      zoomToShapes(
+        controller.store,
+        viewport,
+        focus.shapeIds,
+        propertiesOpen ? FINDINGS_AND_PROPERTIES_INSETS : FINDINGS_INSETS,
+      );
+    },
+    [session, controller, viewport],
+  );
+  const highlight = useMemo(
+    () =>
+      checkState.focus
+        ? {
+            ids: checkState.focus.shapeIds,
+            color: SEVERITY_META[checkState.focus.tone].canvasColor,
+          }
+        : null,
+    [checkState.focus],
+  );
 
   const onSpaceChange = useCallback(
     (pressed: boolean) => {
@@ -249,6 +298,7 @@ function BoardView({
     mac,
     onShowShortcuts: openShortcuts,
     onQuickInsert: openInsert,
+    onCheckDesign: runCheck,
     onSpaceChange,
     onEscape,
   });
@@ -305,6 +355,7 @@ function BoardView({
               onPointerLeave={onPointerLeave}
               spacePressed={spacePressed}
               remoteSelections={remoteSelections}
+              highlight={highlight}
             >
               <RemoteCursors peers={peers} viewport={viewport} />
               <TextEditor controller={controller} viewport={viewport} />
@@ -336,6 +387,17 @@ function BoardView({
             followingClientId={followingClientId}
             onFollow={setFollowingClientId}
           />
+          <Button
+            ref={checkButtonRef}
+            size="sm"
+            variant="outline"
+            aria-keyshortcuts="Shift+C"
+            title="Check design for common problems (⇧C)"
+            onClick={runCheck}
+          >
+            <ClipboardCheck aria-hidden="true" />
+            Check design
+          </Button>
           <Button
             size="sm"
             onClick={() => {
@@ -378,7 +440,16 @@ function BoardView({
           readOnly={readOnly}
         />
         {!readOnly && <ShapePalette controller={controller} />}
-        {!readOnly && <PropertiesPanel controller={controller} />}
+        {!readOnly && <PropertiesPanel controller={controller} besidePanel={checkState.open} />}
+        {checkState.open && (
+          <FindingsPanel
+            check={session.check}
+            store={controller.store}
+            onRecheck={runCheck}
+            onClose={closeCheck}
+            onFocus={focusFinding}
+          />
+        )}
         <ZoomControls controller={controller} viewport={viewport} modKey={modKey} />
 
         <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} mac={mac} />

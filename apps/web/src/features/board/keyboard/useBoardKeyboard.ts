@@ -28,6 +28,8 @@ interface Options {
   mac: boolean;
   onShowShortcuts: () => void;
   onQuickInsert: () => void;
+  /** Runs the rule-based design check and shows its results. */
+  onCheckDesign: () => void;
   onSpaceChange: (pressed: boolean) => void;
   /** Gets first go at Escape (e.g. to stop following someone); return true if handled. */
   onEscape?: (() => boolean) | undefined;
@@ -48,6 +50,7 @@ export function useBoardKeyboard(options: Options): void {
     mac,
     onShowShortcuts,
     onQuickInsert,
+    onCheckDesign,
     onSpaceChange,
     onEscape,
   } = options;
@@ -139,6 +142,9 @@ export function useBoardKeyboard(options: Options): void {
         case "showShortcuts":
           onShowShortcuts();
           break;
+        case "checkDesign":
+          onCheckDesign();
+          break;
       }
     };
 
@@ -191,6 +197,7 @@ export function useBoardKeyboard(options: Options): void {
     mac,
     onShowShortcuts,
     onQuickInsert,
+    onCheckDesign,
     onSpaceChange,
     onEscape,
   ]);

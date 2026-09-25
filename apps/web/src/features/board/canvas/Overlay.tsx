@@ -14,8 +14,15 @@ export interface RemoteSelection {
   ids: readonly string[];
 }
 
+/** Shapes a design-check finding is about, outlined in the finding's severity colour. */
+export interface CanvasHighlight {
+  color: string;
+  ids: readonly string[];
+}
+
 interface OverlayProps {
   remoteSelections: readonly RemoteSelection[];
+  highlight: CanvasHighlight | null;
   controller: BoardController;
   interactions: CanvasInteractions;
   snapshot: BoardSnapshot;
@@ -35,6 +42,7 @@ export function Overlay({
   viewport,
   stageRef,
   remoteSelections,
+  highlight,
 }: OverlayProps) {
   const selected = [...ui.selectedIds].flatMap((id) => {
     const shape = snapshot.shapes.get(id);
@@ -50,6 +58,18 @@ export function Overlay({
 
   return (
     <>
+      {highlight?.ids.map((id) => {
+        const shape = snapshot.shapes.get(id);
+        return shape ? (
+          <FindingHighlight
+            key={`highlight-${id}`}
+            shape={shape}
+            color={highlight.color}
+            lookup={lookup}
+            px={px}
+          />
+        ) : null;
+      })}
       {remoteSelections.flatMap(({ color, ids }) =>
         ids.flatMap((id) => {
           const shape = snapshot.shapes.get(id);
@@ -195,6 +215,54 @@ export function Overlay({
         </Group>
       )}
     </>
+  );
+}
+
+function FindingHighlight({
+  shape,
+  color,
+  lookup,
+  px,
+}: {
+  shape: Shape;
+  color: string;
+  lookup: (id: string) => Shape | undefined;
+  px: number;
+}) {
+  if (shape.type === "arrow") {
+    const { start, end } = resolveArrow(shape, lookup);
+    return (
+      <Line
+        points={[start.x, start.y, end.x, end.y]}
+        stroke={color}
+        strokeWidth={6}
+        strokeScaleEnabled={false}
+        opacity={0.45}
+        lineCap="round"
+        listening={false}
+      />
+    );
+  }
+  const pad = 6 * px;
+  return (
+    <Rect
+      x={shape.x}
+      y={shape.y}
+      offsetX={pad}
+      offsetY={pad}
+      width={shape.w + pad * 2}
+      height={shape.h + pad * 2}
+      rotation={shape.rotation}
+      cornerRadius={8 * px}
+      stroke={color}
+      strokeWidth={3}
+      strokeScaleEnabled={false}
+      fill={`${color}14`}
+      shadowColor={color}
+      shadowBlur={12}
+      shadowOpacity={0.5}
+      listening={false}
+    />
   );
 }
 

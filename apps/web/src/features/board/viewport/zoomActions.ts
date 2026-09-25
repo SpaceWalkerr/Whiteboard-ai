@@ -4,8 +4,18 @@ import { shapeBounds } from "../geometry/shapeBounds";
 import { fitRect, zoomAt } from "./viewport";
 import type { ViewportStore } from "./viewportStore";
 
+export interface Insets {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
 /** Screen space taken by the floating palette (left), properties panel (right) and bars. */
-const PANEL_INSETS = { left: 110, right: 290, top: 70, bottom: 70 };
+export const PANEL_INSETS: Insets = { left: 110, right: 290, top: 70, bottom: 70 };
+
+/** Never zoom in further than this to show a few shapes: one box shouldn't fill the screen. */
+const FOCUS_MAX_SCALE = 1.25;
 
 function center(viewport: ViewportStore) {
   const size = viewport.getSize();
@@ -36,6 +46,35 @@ export function zoomToFit(store: BoardStore, viewport: ViewportStore): void {
   };
   const fitted = fitRect(bounds, area, 32);
   viewport.set({ ...fitted, x: fitted.x + PANEL_INSETS.left, y: fitted.y + PANEL_INSETS.top });
+}
+
+/**
+ * Pans and zooms so the given shapes fill the area not covered by panels (`inset` screen
+ * pixels on each side). Unknown ids are skipped; returns false if none of them exist.
+ */
+export function zoomToShapes(
+  store: BoardStore,
+  viewport: ViewportStore,
+  ids: readonly string[],
+  inset: Insets = PANEL_INSETS,
+): boolean {
+  const { shapes } = store.getSnapshot();
+  const lookup = (id: string) => shapes.get(id);
+  const bounds = unionRects(
+    ids.flatMap((id) => {
+      const shape = shapes.get(id);
+      return shape ? [shapeBounds(shape, lookup)] : [];
+    }),
+  );
+  if (!bounds) return false;
+  const size = viewport.getSize();
+  const area = {
+    width: Math.max(1, size.width - inset.left - inset.right),
+    height: Math.max(1, size.height - inset.top - inset.bottom),
+  };
+  const fitted = fitRect(bounds, area, 48, FOCUS_MAX_SCALE);
+  viewport.set({ ...fitted, x: fitted.x + inset.left, y: fitted.y + inset.top });
+  return true;
 }
 
 /**

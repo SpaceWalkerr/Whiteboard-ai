@@ -14,7 +14,12 @@ import {
   Zap,
   type IconNode,
 } from "lucide";
-import type { SystemShape, SystemShapeType } from "@whiteboard/shared/board";
+import {
+  isSystemShape,
+  type Shape,
+  type SystemShape,
+  type SystemShapeType,
+} from "@whiteboard/shared/board";
 
 export interface SystemShapeMeta {
   label: string;
@@ -107,4 +112,17 @@ export function searchSystemShapes(query: string): SystemShapeType[] {
     })
     .filter((entry) => entry.score > 0);
   return scored.sort((a, b) => b.score - a.score).map((entry) => entry.type);
+}
+
+/** Human name of any shape's type ("Database", "Sticky note"). */
+export function shapeTypeLabel(shape: Shape): string {
+  if (isSystemShape(shape)) return SYSTEM_SHAPE_META[shape.type].label;
+  return {
+    rectangle: "Rectangle",
+    ellipse: "Ellipse",
+    text: "Text",
+    sticky: "Sticky note",
+    freehand: "Drawing",
+    arrow: "Arrow",
+  }[shape.type];
 }

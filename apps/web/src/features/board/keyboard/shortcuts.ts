@@ -25,7 +25,8 @@ export type ShortcutAction =
   | "zoomReset"
   | "zoomIn"
   | "zoomOut"
-  | "showShortcuts";
+  | "showShortcuts"
+  | "checkDesign";
 
 interface KeyMatch {
   /** Compared case-insensitively with KeyboardEvent.key. */
@@ -39,7 +40,7 @@ interface KeyMatch {
 
 export interface Shortcut {
   action: ShortcutAction | null;
-  group: "Tools" | "Edit" | "Arrange" | "View";
+  group: "Tools" | "Edit" | "Arrange" | "View" | "Review";
   description: string;
   /** Human-readable keys; "Mod" renders as ⌘ on macOS and Ctrl elsewhere. */
   keys: readonly string[];
@@ -249,6 +250,13 @@ export const SHORTCUTS: readonly Shortcut[] = [
     description: "Keyboard shortcuts",
     keys: ["?"],
     match: [{ key: "?" }],
+  },
+  {
+    action: "checkDesign",
+    group: "Review",
+    description: "Check design",
+    keys: ["Shift", "C"],
+    match: [{ key: "c", shift: true }],
   },
 ];
 

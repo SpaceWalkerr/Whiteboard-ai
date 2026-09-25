@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useId, useState, useSyncExternalStore } from "react";
-import { EDGE_TYPES, isSystemShape, type Shape, type ShapeStyle } from "@whiteboard/shared/board";
+import { EDGE_TYPES, type ShapeStyle } from "@whiteboard/shared/board";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -25,7 +25,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 import type { BoardController } from "../controller";
 import { FILL_COLORS, STROKE_COLORS } from "../model/colors";
-import { SYSTEM_SHAPE_META } from "../model/systemShapes";
+import { shapeTypeLabel } from "../model/systemShapes";
 import { IconButton } from "./IconButton";
 
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 32, 48];
@@ -35,20 +35,17 @@ const EDGE_LABELS: Record<(typeof EDGE_TYPES)[number], string> = {
   replication: "Replication",
 };
 
-function typeLabel(shape: Shape): string {
-  if (isSystemShape(shape)) return SYSTEM_SHAPE_META[shape.type].label;
-  return {
-    rectangle: "Rectangle",
-    ellipse: "Ellipse",
-    text: "Text",
-    sticky: "Sticky note",
-    freehand: "Drawing",
-    arrow: "Arrow",
-  }[shape.type];
-}
-
-/** Properties of the selection. Style edits apply to every selected shape. */
-export function PropertiesPanel({ controller }: { controller: BoardController }) {
+/**
+ * Properties of the selection. Style edits apply to every selected shape. `besidePanel` moves
+ * it left of the findings panel so both can be open (e.g. to fix a finding).
+ */
+export function PropertiesPanel({
+  controller,
+  besidePanel = false,
+}: {
+  controller: BoardController;
+  besidePanel?: boolean;
+}) {
   const ui = useSyncExternalStore(controller.subscribeUi, controller.getUi);
   const snapshot = useSyncExternalStore(controller.store.subscribe, controller.store.getSnapshot);
   const selected = snapshot.ordered.filter((s) => ui.selectedIds.has(s.id));
@@ -69,9 +66,14 @@ export function PropertiesPanel({ controller }: { controller: BoardController })
   return (
     <aside
       aria-label="Shape properties"
-      className="absolute top-16 right-3 z-20 flex max-h-[calc(100%-5rem)] w-64 flex-col gap-4 overflow-y-auto rounded-lg border bg-background p-3 text-sm shadow-sm"
+      className={cn(
+        "absolute top-16 z-20 flex max-h-[calc(100%-5rem)] w-64 flex-col gap-4 overflow-y-auto rounded-lg border bg-background p-3 text-sm shadow-sm",
+        besidePanel ? "right-[21.5rem]" : "right-3",
+      )}
     >
-      <h2 className="font-semibold">{single ? typeLabel(single) : `${selected.length} shapes`}</h2>
+      <h2 className="font-semibold">
+        {single ? shapeTypeLabel(single) : `${selected.length} shapes`}
+      </h2>
 
       {single &&
         single.type !== "text" &&

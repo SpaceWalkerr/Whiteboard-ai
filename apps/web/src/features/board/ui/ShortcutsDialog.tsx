@@ -8,7 +8,7 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { formatKey, SHORTCUTS, type Shortcut } from "../keyboard/shortcuts";
 
-const GROUPS: Shortcut["group"][] = ["Tools", "Edit", "Arrange", "View"];
+const GROUPS: Shortcut["group"][] = ["Tools", "Edit", "Arrange", "View", "Review"];
 
 export function ShortcutsDialog({
   open,
