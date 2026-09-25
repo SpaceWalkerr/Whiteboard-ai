@@ -2,64 +2,142 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Logger } from "pino";
 import { WebSocketServer } from "ws";
+import { boardIdSchema, CLOSE_CODES, MAX_CLIENT_MESSAGE_BYTES } from "@whiteboard/shared/sync";
+import type { AuthorizeConnection } from "./auth";
+import { SyncConnection } from "./connection";
+import type { SyncMetrics } from "./metrics";
+import { TokenBucket } from "./rateLimit";
+import { RoomManager, type RoomManagerOptions } from "./rooms";
 
-export const SYNC_PATH = "/sync";
+export const ROOM_PATH = /^\/rooms\/([^/]+)$/;
 
-/** Close code sent to clients when the server restarts, telling them to reconnect. */
-export const WS_CLOSE_SERVICE_RESTART = 1012;
-
-export interface SyncUpgradeOptions {
+export interface SyncServerOptions {
   isAllowedOrigin: (origin: string) => boolean;
+  authorize: AuthorizeConnection;
   logger: Logger;
+  metrics: SyncMetrics;
+  roomGraceMs: number;
+  /** Per connection: messages/second and bytes/second, each a token bucket. */
+  rateLimit: { perSecond: number; burst: number; bytesPerSecond: number; bytesBurst: number };
+  heartbeatMs?: number | undefined;
+  maxBufferedBytes?: number | undefined;
+  onRoomEvict?: RoomManagerOptions["onEvict"];
+}
+
+export interface SyncServer {
+  rooms: RoomManager;
+  /** Closes every client with "service restart" (they reconnect) and stops timers. */
+  close(): Promise<void>;
 }
 
 /**
- * Shares the HTTP port with Fastify by handling `upgrade` events ourselves.
- * Phase 0 only enforces the Origin check; no connection is accepted until Phase 2 adds
- * JWT authentication and board authorization here, so there is never an unauthenticated socket.
+ * Yjs sync over WebSocket at /rooms/:boardId, sharing the HTTP port with Fastify. Every
+ * upgrade checks the room id, the Origin header and authorization before the socket is
+ * accepted.
  */
-export function attachSyncServer(server: Server, options: SyncUpgradeOptions): WebSocketServer {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+export function attachSyncServer(server: Server, options: SyncServerOptions): SyncServer {
+  const { logger, metrics } = options;
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_MESSAGE_BYTES });
+  const rooms = new RoomManager({
+    graceMs: options.roomGraceMs,
+    metrics,
+    logger,
+    onEvict: options.onRoomEvict,
+  });
+  const connections = new Set<SyncConnection>();
 
-  server.on("upgrade", (request: IncomingMessage, socket: Duplex) => {
+  const reject = (socket: Duplex, status: number, reason: string, metric: string) => {
+    metrics.rejected.inc({ reason: metric });
+    socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  };
+
+  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on("error", (error) => {
-      options.logger.debug({ err: error }, "upgrade socket error");
+      logger.debug({ err: error }, "upgrade socket error");
     });
 
     const { pathname } = new URL(request.url ?? "/", "http://localhost");
-    if (pathname !== SYNC_PATH) {
-      rejectUpgrade(socket, 404, "Not Found");
+    const match = ROOM_PATH.exec(pathname);
+    if (!match) {
+      reject(socket, 404, "Not Found", "not_found");
+      return;
+    }
+    let boardId: string;
+    try {
+      boardId = decodeURIComponent(match[1] ?? "");
+    } catch {
+      boardId = "";
+    }
+    if (!boardIdSchema.safeParse(boardId).success) {
+      reject(socket, 400, "Bad Request", "bad_room");
       return;
     }
 
     const origin = request.headers.origin;
     if (origin === undefined || !options.isAllowedOrigin(origin)) {
-      options.logger.warn({ origin }, "websocket upgrade rejected: origin not allowed");
-      rejectUpgrade(socket, 403, "Forbidden");
+      logger.warn({ origin }, "websocket upgrade rejected: origin not allowed");
+      reject(socket, 403, "Forbidden", "origin");
       return;
     }
 
-    // Phase 2: verify the Supabase JWT and the caller's role on the board, then
-    // wss.handleUpgrade(...). Until then every upgrade is refused.
-    rejectUpgrade(socket, 401, "Unauthorized");
+    options.authorize(request, boardId).then(
+      (result) => {
+        if (!result.ok) {
+          reject(
+            socket,
+            result.status,
+            result.status === 401 ? "Unauthorized" : "Forbidden",
+            "unauthorized",
+          );
+          return;
+        }
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          const room = rooms.acquire(boardId);
+          const connection = new SyncConnection(ws, room, result.identity, {
+            rateLimiter: new TokenBucket(options.rateLimit.burst, options.rateLimit.perSecond),
+            byteLimiter: new TokenBucket(
+              options.rateLimit.bytesBurst,
+              options.rateLimit.bytesPerSecond,
+            ),
+            metrics,
+            logger,
+            maxBufferedBytes: options.maxBufferedBytes ?? 4 * 1024 * 1024,
+            onClose: (closed) => {
+              connections.delete(closed);
+              metrics.connectionsActive.set(connections.size);
+              rooms.leave(closed.room, closed);
+            },
+          });
+          rooms.join(room, connection);
+          connections.add(connection);
+          metrics.connectionsActive.set(connections.size);
+          connection.start();
+        });
+      },
+      (error: unknown) => {
+        logger.error({ err: error, boardId }, "authorization failed");
+        reject(socket, 500, "Internal Server Error", "error");
+      },
+    );
   });
 
-  return wss;
-}
+  const heartbeat = setInterval(() => {
+    for (const connection of connections) connection.heartbeat();
+  }, options.heartbeatMs ?? 30_000);
+  heartbeat.unref();
 
-/** Closes every open socket with "service restart" so clients reconnect to another instance. */
-export async function closeSyncServer(wss: WebSocketServer): Promise<void> {
-  for (const client of wss.clients) {
-    client.close(WS_CLOSE_SERVICE_RESTART, "server restarting");
-  }
-  await new Promise<void>((resolve, reject) => {
-    wss.close((error) => {
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-}
-
-function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
-  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  return {
+    rooms,
+    close: async () => {
+      clearInterval(heartbeat);
+      for (const connection of connections)
+        connection.close(CLOSE_CODES.serviceRestart, "server restarting");
+      await new Promise<void>((resolve) => {
+        wss.close(() => {
+          resolve();
+        });
+      });
+      rooms.destroy();
+    },
+  };
 }

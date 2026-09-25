@@ -9,7 +9,9 @@
     "./env/server": "./src/env/server.ts",
     "./env/web": "./src/env/web.ts",
     "./schemas": "./src/schemas/index.ts",
-    "./db": "./src/db/index.ts"
+    "./db": "./src/db/index.ts",
+    "./board": "./src/board/index.ts",
+    "./sync": "./src/sync/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings=0",
@@ -20,7 +22,11 @@
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
+    "fractional-indexing": "4.0.0",
+    "lib0": "catalog:",
     "postgres": "catalog:",
+    "y-protocols": "catalog:",
+    "yjs": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

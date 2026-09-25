@@ -6,7 +6,9 @@ import { createOriginMatcher } from "./http/origins";
 import { closeRedis, createRedis } from "./infra/redis";
 import { createLogger } from "./logger";
 import { createShutdown } from "./shutdown";
-import { attachSyncServer, closeSyncServer } from "./sync/upgrade";
+import { allowAllConnections } from "./sync/auth";
+import { createSyncMetrics } from "./sync/metrics";
+import { attachSyncServer } from "./sync/upgrade";
 
 function readEnvOrExit(): ServerEnv {
   try {
@@ -34,6 +36,7 @@ async function main(): Promise<void> {
     allowedOriginPattern: env.CORS_ALLOWED_ORIGIN_PATTERN,
   });
 
+  const metrics = createSyncMetrics();
   const app = buildApp({
     logger,
     isAllowedOrigin,
@@ -41,14 +44,28 @@ async function main(): Promise<void> {
       { name: "postgres", check: () => sql`select 1` },
       ...(redis ? [{ name: "redis", check: () => redis.ping() }] : []),
     ],
+    metrics: { registry: metrics.registry, token: env.METRICS_TOKEN },
   });
-  const wss = attachSyncServer(app.server, { isAllowedOrigin, logger });
+  const sync = attachSyncServer(app.server, {
+    isAllowedOrigin,
+    // TEMPORARY: Phase 4 replaces this with Supabase JWT verification + board role lookup.
+    authorize: allowAllConnections,
+    logger,
+    metrics,
+    roomGraceMs: env.SYNC_ROOM_GRACE_MS,
+    rateLimit: {
+      perSecond: env.SYNC_RATE_LIMIT_PER_SEC,
+      burst: env.SYNC_RATE_LIMIT_BURST,
+      bytesPerSecond: env.SYNC_BYTES_PER_SEC,
+      bytesBurst: env.SYNC_BYTES_BURST,
+    },
+  });
 
   const shutdown = createShutdown({
     logger,
     timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
     steps: [
-      { name: "websockets", run: () => closeSyncServer(wss) },
+      { name: "websockets", run: () => sync.close() },
       { name: "http", run: () => app.close() },
       ...(redis ? [{ name: "redis", run: () => closeRedis(redis) }] : []),
       { name: "postgres", run: () => sql.end({ timeout: 5 }) },

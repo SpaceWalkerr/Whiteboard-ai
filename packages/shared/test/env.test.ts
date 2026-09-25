@@ -52,9 +52,28 @@ describe("loadEnv(serverEnvSchema)", () => {
 
   it("requires Redis in production", () => {
     const error = captureError(() =>
-      loadEnv(serverEnvSchema, { ...validServerEnv, REDIS_URL: "", NODE_ENV: "production" }),
+      loadEnv(serverEnvSchema, {
+        ...validServerEnv,
+        REDIS_URL: "",
+        NODE_ENV: "production",
+        METRICS_TOKEN: "m".repeat(32),
+      }),
     );
     expect(error.issues).toEqual([{ variable: "REDIS_URL", problem: "is required in production" }]);
+  });
+
+  it("requires a strong metrics token in production only", () => {
+    expect(loadEnv(serverEnvSchema, validServerEnv).METRICS_TOKEN).toBeUndefined();
+    const missing = captureError(() =>
+      loadEnv(serverEnvSchema, { ...validServerEnv, NODE_ENV: "production" }),
+    );
+    expect(missing.issues).toEqual([
+      { variable: "METRICS_TOKEN", problem: "is required in production" },
+    ]);
+    const short = captureError(() =>
+      loadEnv(serverEnvSchema, { ...validServerEnv, METRICS_TOKEN: "short" }),
+    );
+    expect(short.issues[0]?.variable).toBe("METRICS_TOKEN");
   });
 
   it("never echoes variable values in the error message", () => {
@@ -94,14 +113,40 @@ describe("loadEnv(serverEnvSchema)", () => {
 });
 
 describe("loadEnv(webEnvSchema)", () => {
-  it("strips a trailing slash from the API URL", () => {
-    expect(loadEnv(webEnvSchema, { VITE_API_URL: "http://localhost:4000/" }).VITE_API_URL).toBe(
-      "http://localhost:4000",
+  it("strips a trailing slash from the API and WebSocket URLs", () => {
+    const env = loadEnv(webEnvSchema, {
+      VITE_API_URL: "http://localhost:4000/",
+      VITE_WS_URL: "ws://localhost:4000/",
+    });
+    expect(env.VITE_API_URL).toBe("http://localhost:4000");
+    expect(env.VITE_WS_URL).toBe("ws://localhost:4000");
+  });
+
+  it("requires a ws:// or wss:// sync URL", () => {
+    const error = captureError(() =>
+      loadEnv(webEnvSchema, {
+        VITE_API_URL: "http://localhost:4000",
+        VITE_WS_URL: "http://localhost:4000",
+      }),
+    );
+    expect(error.issues).toEqual([
+      { variable: "VITE_WS_URL", problem: "must be a ws:// or wss:// URL" },
+    ]);
+  });
+
+  it("keeps debug tools off unless explicitly enabled", () => {
+    const base = { VITE_API_URL: "http://localhost:4000", VITE_WS_URL: "ws://localhost:4000" };
+    expect(loadEnv(webEnvSchema, base).VITE_DEBUG_TOOLS).toBe(false);
+    expect(loadEnv(webEnvSchema, { ...base, VITE_DEBUG_TOOLS: "true" }).VITE_DEBUG_TOOLS).toBe(
+      true,
     );
   });
 
   it("fails when VITE_API_URL is missing", () => {
     const error = captureError(() => loadEnv(webEnvSchema, { MODE: "production" }));
-    expect(error.issues).toEqual([{ variable: "VITE_API_URL", problem: "is required" }]);
+    expect(error.issues).toEqual([
+      { variable: "VITE_API_URL", problem: "is required" },
+      { variable: "VITE_WS_URL", problem: "is required" },
+    ]);
   });
 });

@@ -57,19 +57,36 @@ It is required in production (the server refuses to boot without it there).
 
 ## Everyday commands
 
-| Command            | What it does                                                         |
-| ------------------ | -------------------------------------------------------------------- |
-| `pnpm dev`         | Migrate the local DB, then run web + server with hot reload          |
-| `pnpm lint`        | ESLint (type-aware) in every package                                 |
-| `pnpm typecheck`   | `tsc --noEmit` in every package                                      |
-| `pnpm test`        | Vitest in every package (the RLS test uses `DATABASE_URL`)           |
-| `pnpm test:e2e`    | Playwright smoke test (starts server + built web app itself)         |
-| `pnpm build`       | Production builds (`apps/web/dist`, `apps/server/dist`)              |
-| `pnpm db:generate` | Generate a new SQL migration from the Drizzle schema                 |
-| `pnpm db:migrate`  | Apply pending migrations to `DATABASE_URL` (from `apps/server/.env`) |
-| `pnpm format`      | Prettier                                                             |
+| Command                              | What it does                                                         |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| `pnpm dev`                           | Migrate the local DB, then run web + server with hot reload          |
+| `pnpm lint`                          | ESLint (type-aware) in every package                                 |
+| `pnpm typecheck`                     | `tsc --noEmit` in every package                                      |
+| `pnpm test`                          | Vitest in every package (the RLS test uses `DATABASE_URL`)           |
+| `pnpm test:e2e`                      | Playwright E2E tests (starts the server + a built web app itself)    |
+| `pnpm --filter @whiteboard/web perf` | Pans a 2,000-shape board and reports FPS (local only)                |
+| `pnpm build`                         | Production builds (`apps/web/dist`, `apps/server/dist`)              |
+| `pnpm db:generate`                   | Generate a new SQL migration from the Drizzle schema                 |
+| `pnpm db:migrate`                    | Apply pending migrations to `DATABASE_URL` (from `apps/server/.env`) |
+| `pnpm format`                        | Prettier                                                             |
 
 A pre-commit hook (husky + lint-staged) lints and formats staged files.
+
+### The board (`/board/:boardId`)
+
+Click **New board** on the home page and share the URL: everyone with the link edits the same
+board live, with cursors and presence. Board state is a Yjs document
+(`packages/shared/src/board`) synced through our own WebSocket server at `/rooms/:boardId`
+(`apps/server/src/sync`, client in `packages/shared/src/sync`). Rooms live in server memory
+until persistence arrives (Phase 3). Press **?** on the board for every keyboard shortcut; **/**
+inserts a system-design shape by name and connects it from the selected shape.
+
+Server metrics (Prometheus) are at `GET /metrics` (bearer `METRICS_TOKEN` when set).
+
+Code map: `apps/web/src/features/board/` — `controller.ts` (all editing commands),
+`interaction/pointer.ts` (pointer gestures), `canvas/` (react-konva rendering), `ui/` (toolbar,
+palette, properties, dialogs), `export/` (SVG/PNG). UI code never touches Yjs directly; it goes
+through `BoardStore`.
 
 ### Database migrations
 

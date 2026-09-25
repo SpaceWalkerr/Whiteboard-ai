@@ -11,8 +11,11 @@ catalog:
   "@types/node": 22.20.4
   drizzle-orm: 0.45.3
   eslint: 9.39.5
+  lib0: 0.2.117
   postgres: 3.4.9
   tsx: 4.23.15
   typescript: 5.9.3
   vitest: 4.1.11
+  y-protocols: 1.0.7
+  yjs: 13.6.33
   zod: 4.6.5

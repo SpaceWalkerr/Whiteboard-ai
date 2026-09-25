@@ -56,12 +56,39 @@ export const serverEnvSchema = z
         }
       }),
 
+    /** How long an empty sync room keeps its document in memory before eviction. */
+    SYNC_ROOM_GRACE_MS: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
+    /** Per-connection message rate limit (token bucket). */
+    SYNC_RATE_LIMIT_PER_SEC: z.coerce.number().int().min(1).max(10_000).default(120),
+    SYNC_RATE_LIMIT_BURST: z.coerce.number().int().min(1).max(100_000).default(300),
+    /** Per-connection byte budget (token bucket): sustained bytes/second and burst bytes. */
+    SYNC_BYTES_PER_SEC: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .default(1024 * 1024),
+    SYNC_BYTES_BURST: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .default(16 * 1024 * 1024),
+
+    /** Bearer token for GET /metrics. Optional in development, required in production. */
+    METRICS_TOKEN: z.string().min(32, { message: "must be at least 32 characters" }).optional(),
+
     /** Hard deadline for graceful shutdown; must stay below Render's shutdown window. */
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(290_000).default(25_000),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production" && env.REDIS_URL === undefined) {
       ctx.addIssue({ code: "custom", path: ["REDIS_URL"], message: "is required in production" });
+    }
+    if (env.NODE_ENV === "production" && env.METRICS_TOKEN === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["METRICS_TOKEN"],
+        message: "is required in production",
+      });
     }
   });
 

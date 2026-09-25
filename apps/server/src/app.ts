@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import cors from "@fastify/cors";
 import Fastify, { LogController } from "fastify";
+import type { Registry } from "prom-client";
 import type { Logger } from "pino";
 import type { HealthResponse } from "@whiteboard/shared/schemas";
 import { AppError, type ErrorBody } from "./errors";
@@ -12,6 +13,8 @@ export interface AppOptions {
   readinessChecks: readonly DependencyCheck[];
   /** Per-dependency timeout for /readyz. Kept short so health checks answer quickly. */
   readinessTimeoutMs?: number;
+  /** Prometheus registry served at /metrics; `token` (when set) is required as a bearer token. */
+  metrics?: { registry: Registry; token: string | undefined };
 }
 
 export function buildApp(options: AppOptions) {
@@ -20,7 +23,8 @@ export function buildApp(options: AppOptions) {
     genReqId: () => randomUUID(),
     logController: new LogController({
       // Health probes hit these every few seconds; logging them would drown real traffic.
-      disableRequestLogging: (request) => request.url === "/healthz" || request.url === "/readyz",
+      disableRequestLogging: (request) =>
+        request.url === "/healthz" || request.url === "/readyz" || request.url === "/metrics",
     }),
   });
 
@@ -71,7 +75,27 @@ export function buildApp(options: AppOptions) {
     return reply.status(body.status === "ready" ? 200 : 503).send(body);
   });
 
+  const metrics = options.metrics;
+  if (metrics) {
+    app.get("/metrics", async (request, reply) => {
+      if (
+        metrics.token !== undefined &&
+        !bearerMatches(request.headers.authorization, metrics.token)
+      ) {
+        throw new AppError(401, "UNAUTHORIZED", "A valid metrics token is required");
+      }
+      return reply.type(metrics.registry.contentType).send(await metrics.registry.metrics());
+    });
+  }
+
   return app;
+}
+
+/** Constant-time comparison so the token can't be guessed byte by byte from timings. */
+function bearerMatches(header: string | undefined, token: string): boolean {
+  const provided = Buffer.from(header?.startsWith("Bearer ") ? header.slice(7) : "");
+  const expected = Buffer.from(token);
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 export type App = ReturnType<typeof buildApp>;

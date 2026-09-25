@@ -27,6 +27,8 @@ services:
         value: info
       - key: SHUTDOWN_TIMEOUT_MS
         value: "25000"
+      - key: METRICS_TOKEN # bearer token for GET /metrics
+        generateValue: true
       - key: DATABASE_URL # Supabase pooler, SESSION mode (port 5432)
         sync: false
       - key: CORS_ALLOWED_ORIGINS

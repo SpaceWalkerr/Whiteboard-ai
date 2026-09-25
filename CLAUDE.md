@@ -9,7 +9,8 @@ data safety matter more than speed or feature count.
   STOP and wait for my approval.
 - Work only on the current phase. If you notice something for a later phase, note it in
   PROGRESS.md under "Later" — do not build it.
-- After implementing: run `pnpm lint && pnpm typecheck && pnpm test` and fix every failure.
+- After implementing: run `pnpm lint && pnpm typecheck && pnpm test` and fix every failure
+  (`pnpm test` needs `DATABASE_URL` in `apps/server/.env` for the RLS test).
   Never disable a lint rule, skip a test, or use `any`/`@ts-ignore` to make checks pass.
 - Update PROGRESS.md: what was done, decisions made (with the reason), known issues.
 - Tell me exactly how to verify the phase manually (commands + what I should see).
@@ -20,7 +21,7 @@ data safety matter more than speed or feature count.
 Browser ──HTTPS──▶ Vercel: apps/web (React SPA, static)
    │
    ├──HTTPS (REST, Bearer JWT)──▶ Render: apps/server (Node) ──▶ Supabase Postgres
-   └──WSS  (Yjs sync, JWT)──────▶ Render: apps/server (same service) ──▶ Render Key Value (Redis)
+   └──WSS  (Yjs sync, JWT)──────▶ Render: apps/server (same service) ──▶ Render Key Value (Redis, production)
    └──Supabase Auth only (sign-in, session refresh) ──▶ Supabase
 ```
 - The frontend NEVER reads or writes the database directly. It uses Supabase only for auth.
@@ -44,7 +45,9 @@ Browser ──HTTPS──▶ Vercel: apps/web (React SPA, static)
   (asymmetric signing keys) — never trust a user id sent in a request body.
   Organizations, memberships and board roles are OUR tables, not Supabase features.
 - Cache / cross-instance messaging / rate limits / leases: Redis via ioredis
-  (Render Key Value in production, docker Redis locally).
+  (Render Key Value in production). `REDIS_URL` is optional outside production — local
+  development runs without Redis — and required when `NODE_ENV=production`. Code that uses
+  Redis must keep working (single-instance behaviour) when it is absent in development.
 - File storage (thumbnails, exports): Supabase Storage, private buckets, accessed only by
   apps/server with the service key; the browser gets short-lived signed URLs.
 - Background jobs (compaction sweeps, hard deletes, digests): Render Cron Jobs that call
@@ -57,8 +60,13 @@ Browser ──HTTPS──▶ Vercel: apps/web (React SPA, static)
 - Tests: Vitest (unit/integration), Playwright (E2E, including two-browser collaboration), k6 (load).
 
 ## Environments & deployment
-- Local: docker-compose (Postgres 16, Redis 7) + the Supabase CLI (`supabase start`) for local
-  Auth/Storage. `pnpm dev` runs web + server.
+- Local: NO Docker and nothing else installed besides Node 22 + pnpm 10. Development uses a
+  hosted Supabase **dev** project (Postgres + Auth + Storage), reached through its session-pooler
+  `DATABASE_URL` in `apps/server/.env`. No local Redis. `pnpm dev` applies migrations to the dev
+  project, then runs web (5173) + server (4000). Do not add docker-compose, the Supabase CLI or
+  other local services without asking.
+- CI (GitHub Actions): lint, typecheck, build, Vitest against a `supabase/postgres` service
+  container (same roles and `auth` schema as hosted Supabase), Playwright smoke.
 - Frontend → Vercel (project root apps/web). `vercel.json` rewrites all non-file routes to
   index.html. Only `VITE_*` public values in the frontend: API URL, WS URL, Supabase URL,
   Supabase publishable/anon key, Sentry DSN, PostHog key.
@@ -68,7 +76,8 @@ Browser ──HTTPS──▶ Vercel: apps/web (React SPA, static)
   region; Cron Jobs as needed.
 - Database → Supabase, in the SAME region as Render (Singapore: Render `singapore`,
   Supabase `ap-southeast-1`). Every cross-region query adds ~60 ms.
-- Separate Supabase projects and Render services for staging and production.
+- Separate Supabase projects for development, staging and production (never point local
+  development at staging or production data); separate Render services for staging and production.
 
 ## Supabase rules (security-critical)
 - Enable Row Level Security on EVERY table in the `public` schema, with no policies for the

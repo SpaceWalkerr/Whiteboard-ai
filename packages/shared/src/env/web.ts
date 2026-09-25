@@ -6,6 +6,19 @@ export const webEnvSchema = z.object({
     .url()
     .refine((value) => /^https?:\/\//.test(value), { message: "must be an http(s) URL" })
     .transform((value) => value.replace(/\/$/, "")),
+  /** Base URL of the sync server's WebSocket endpoint (same host as the API). */
+  VITE_WS_URL: z
+    .url()
+    .refine((value) => /^wss?:\/\//.test(value), { message: "must be a ws:// or wss:// URL" })
+    .transform((value) => value.replace(/\/$/, "")),
+  /**
+   * Exposes window.__whiteboard test hooks (E2E and performance runs only). Never set this for
+   * a deployed build.
+   */
+  VITE_DEBUG_TOOLS: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => value === "true"),
 });
 
 export type WebEnv = z.output<typeof webEnvSchema>;
