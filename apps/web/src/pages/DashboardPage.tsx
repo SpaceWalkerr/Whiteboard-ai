@@ -92,6 +92,9 @@ export function DashboardPage() {
     queryFn: () => api.request("/folders", { schema: foldersSchema }),
   });
 
+  const folderName =
+    view === "mine" ? folders.data?.folders.find((f) => f.id === folderId)?.name : undefined;
+
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["boards"] });
   };
@@ -140,7 +143,7 @@ export function DashboardPage() {
         )}
         <main className="grid min-w-0 flex-1 content-start gap-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h1 className="text-2xl font-bold tracking-tight">Boards</h1>
+            <h1 className="text-2xl font-bold tracking-tight">{folderName ?? "Boards"}</h1>
             <Button
               onClick={() => {
                 create.mutate();

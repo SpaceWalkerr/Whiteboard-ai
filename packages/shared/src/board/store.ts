@@ -53,13 +53,6 @@ export class BoardStore {
     for (const id of this.yShapes.keys()) this.readShape(id);
     this.snapshot = this.buildSnapshot();
     this.yShapes.observeDeep(this.handleChanges);
-
-    const meta = this.doc.getMap("meta");
-    if (!meta.has("schemaVersion")) {
-      this.doc.transact(() => {
-        meta.set("schemaVersion", BOARD_SCHEMA_VERSION);
-      }, this.localOrigin);
-    }
   }
 
   /** @internal Used by BoardHistory; not for UI code. */
@@ -88,7 +81,14 @@ export class BoardStore {
   /** Runs several changes as one Yjs transaction (one update, one undo step). */
   transact(fn: () => void): void {
     this.assertWritable();
-    this.doc.transact(fn, this.localOrigin);
+    this.doc.transact(() => {
+      // Stamped with the first local edit, not at construction: the store is created before
+      // the first sync (so the doc still looks empty), and opening a board — above all as a
+      // viewer, whose writes the server drops — must not produce an update of its own.
+      const meta = this.doc.getMap("meta");
+      if (!meta.has("schemaVersion")) meta.set("schemaVersion", BOARD_SCHEMA_VERSION);
+      fn();
+    }, this.localOrigin);
   }
 
   private assertWritable(): void {

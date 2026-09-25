@@ -407,17 +407,32 @@ export function registerSharingRoutes(app: FastifyInstance, deps: ApiDeps): void
             email: invites.email,
             role: invites.role,
             orgId: boards.orgId,
+            acceptedBy: invites.acceptedBy,
           })
           .from(invites)
           .innerJoin(boards, eq(boards.id, invites.boardId))
           .where(
             and(
               eq(invites.tokenHash, hashToken(token)),
-              sql`${invites.revokedAt} is null and ${invites.acceptedAt} is null and ${invites.expiresAt} > now() and ${boards.deletedAt} is null`,
+              sql`${invites.revokedAt} is null and ${invites.expiresAt} > now() and ${boards.deletedAt} is null`,
             ),
           );
-        if (!invite)
-          throw new NotFoundError("This invite is invalid, expired or has already been used.");
+        const invalid = new NotFoundError(
+          "This invite is invalid, expired or has already been used.",
+        );
+        if (!invite) throw invalid;
+        if (invite.acceptedBy !== null) {
+          // Already accepted — usually automatically at this user's first sign-in, just before
+          // they land here. Opening the link again is fine, but it never re-grants access to
+          // someone who has since been removed.
+          if (invite.acceptedBy !== user.id) throw invalid;
+          const [member] = await tx
+            .select({ role: boardMembers.role })
+            .from(boardMembers)
+            .where(and(eq(boardMembers.boardId, invite.boardId), eq(boardMembers.userId, user.id)));
+          if (!member) throw invalid;
+          return { boardId: invite.boardId, role: member.role };
+        }
         if (invite.email !== user.email) {
           throw new ForbiddenError(
             `This invite was sent to ${invite.email}. Sign in with that address to accept it.`,

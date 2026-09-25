@@ -9,13 +9,34 @@ import {
 import type { BoardController } from "../controller";
 import type { Point } from "../geometry/bounds";
 import type { ViewportStore } from "../viewport/viewportStore";
+import { forgetBoardDetail } from "@/auth/localData";
 import { attachLocalCache } from "./localCache";
 import { browserNetworkSignal } from "./networkSignal";
 import { throttle, type PeersStore, type StatusStore } from "./stores";
 
 /** Keeps the board cached in IndexedDB (opens instantly and offline; offline edits survive). */
-export function useLocalCache(controller: BoardController, boardId: string): void {
-  useEffect(() => attachLocalCache(controller.store, boardId), [controller, boardId]);
+export function useLocalCache(
+  controller: BoardController,
+  boardId: string,
+  status: StatusStore,
+): void {
+  useEffect(() => {
+    const cache = attachLocalCache(controller.store, boardId);
+    // Removed from the board, link revoked or board deleted: don't leave a copy on this
+    // device (it would still open offline). An expired session ("unauthorized") keeps it —
+    // it may hold offline edits that sync after signing in again.
+    const unsubscribe = status.subscribe(() => {
+      const { connection, denied } = status.get();
+      if (connection !== "denied" || denied === "unauthorized") return;
+      unsubscribe();
+      forgetBoardDetail(boardId);
+      void cache.wipe();
+    });
+    return () => {
+      unsubscribe();
+      cache.detach();
+    };
+  }, [controller, boardId, status]);
 }
 
 /** Connects the board's Y.Doc to the sync server for as long as the component is mounted. */

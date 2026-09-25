@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useParams } from "react-router";
 import { boardDetailSchema, ticketResponseSchema } from "@whiteboard/shared/api";
 import type { WebEnv } from "@whiteboard/shared/env/web";
@@ -74,6 +74,27 @@ export function BoardRoute({ env }: { env: WebEnv }) {
     }
   }, [api, boardId, shareToken]);
 
+  // The ticket doesn't depend on the board details, and the socket can't connect without it,
+  // so ask for both at once (saves a full API round trip when opening a board). The first
+  // connection uses this ticket; reconnects always fetch a fresh one.
+  const prefetched = useRef<{
+    boardId: string;
+    ticket: Promise<TicketFetchResult> | null; // null once used
+  } | null>(null);
+  const canFetch = valid && status !== "loading";
+  useEffect(() => {
+    if (!canFetch || prefetched.current?.boardId === boardId) return;
+    prefetched.current = { boardId, ticket: fetchTicket() };
+  }, [canFetch, boardId, fetchTicket]);
+  const getTicket = useCallback((): Promise<TicketFetchResult> => {
+    const first = prefetched.current;
+    if (first?.boardId === boardId && first.ticket) {
+      prefetched.current = { boardId, ticket: null };
+      return first.ticket;
+    }
+    return fetchTicket();
+  }, [boardId, fetchTicket]);
+
   const renameBoard = useCallback(
     async (title: string) => {
       await api.request(`/boards/${boardId}`, {
@@ -127,7 +148,7 @@ export function BoardRoute({ env }: { env: WebEnv }) {
       debugTools={env.VITE_DEBUG_TOOLS}
       detail={detail.data}
       me={me}
-      fetchTicket={fetchTicket}
+      fetchTicket={getTicket}
       onTitleChange={renameBoard}
     />
   );

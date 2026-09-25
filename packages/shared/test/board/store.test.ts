@@ -166,4 +166,18 @@ describe("BoardStore view-only mode", () => {
     Y.applyUpdate(store.doc, Y.encodeStateAsUpdate(remote.doc), "remote");
     expect(store.getShape(shape.id)?.x).toBe(99);
   });
+
+  it("writes nothing to the document until the first local edit", () => {
+    // A viewer opening a board must not create updates (the server would drop them and the
+    // board would look unsaved forever); editors shouldn't send one on every open either.
+    const doc = new Y.Doc();
+    const onUpdate = vi.fn();
+    doc.on("update", onUpdate);
+    const store = new BoardStore({ doc });
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    store.createShape(rect());
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(doc.getMap("meta").get("schemaVersion")).toBeTypeOf("number");
+  });
 });

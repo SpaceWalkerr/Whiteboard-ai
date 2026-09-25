@@ -44,6 +44,14 @@ export function cachedBoardDetail(boardId: string): BoardDetail | null {
   }
 }
 
+export function forgetBoardDetail(boardId: string): void {
+  try {
+    localStorage.removeItem(`${BOARD_DETAIL_PREFIX}${boardId}`);
+  } catch {
+    // ignore
+  }
+}
+
 /** Where to go after signing in (only same-origin paths, never full URLs). */
 export function rememberReturnTo(path: string): void {
   if (!path.startsWith("/") || path.startsWith("//")) return;

@@ -81,30 +81,51 @@ jobs:
       VITE_SUPABASE_URL: ${{ secrets.CI_SUPABASE_URL }}
       VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.CI_SUPABASE_PUBLISHABLE_KEY }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      # Until the CI Supabase project's secrets are set (and on pull requests from forks, which
+      # never receive secrets) there is nothing to run against: skip with a visible warning
+      # instead of failing every push.
+      - name: Check the CI Supabase project is configured
+        id: config
+        run: |
+          if [ -n "$DATABASE_URL" ] && [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] && [ -n "$VITE_SUPABASE_PUBLISHABLE_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=E2E skipped::Set the CI_DATABASE_URL, CI_SUPABASE_URL, CI_SUPABASE_SERVICE_ROLE_KEY and CI_SUPABASE_PUBLISHABLE_KEY repository secrets (a dedicated CI Supabase project) to run the Playwright tests."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.config.outputs.ready == 'true'
+        uses: actions/checkout@v7
+      - if: steps.config.outputs.ready == 'true'
+        uses: pnpm/action-setup@v6
+      - if: steps.config.outputs.ready == 'true'
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm db:migrate
+      - if: steps.config.outputs.ready == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.config.outputs.ready == 'true'
+        run: pnpm db:migrate
       - name: Generate a per-run room ticket secret
+        if: steps.config.outputs.ready == 'true'
         run: echo "ROOM_TICKET_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - name: Resolve Playwright version
+        if: steps.config.outputs.ready == 'true'
         id: pw
         run: echo "version=$(pnpm --filter @whiteboard/web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - if: steps.config.outputs.ready == 'true'
+        uses: actions/cache@v6
         id: pw-cache
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - if: steps.pw-cache.outputs.cache-hit != 'true'
+      - if: steps.config.outputs.ready == 'true' && steps.pw-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @whiteboard/web exec playwright install --with-deps chromium
-      - if: steps.pw-cache.outputs.cache-hit == 'true'
+      - if: steps.config.outputs.ready == 'true' && steps.pw-cache.outputs.cache-hit == 'true'
         run: pnpm --filter @whiteboard/web exec playwright install-deps chromium
-      - run: pnpm test:e2e
-      - if: failure()
+      - if: steps.config.outputs.ready == 'true'
+        run: pnpm test:e2e
+      - if: failure() && steps.config.outputs.ready == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report

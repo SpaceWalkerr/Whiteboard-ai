@@ -28,9 +28,10 @@ test.describe("accounts, sharing and permissions", () => {
 
     // B signs in; the pending invite for their email is accepted automatically.
     await signInWithMagicLink(b, bob);
-    const shared = b.getByRole("region", { name: "Shared with me" });
-    await expect(shared.getByRole("link")).toHaveCount(1);
-    await shared.getByRole("link").click();
+    await b.getByRole("tab", { name: "Shared with me" }).click();
+    const sharedBoard = b.getByRole("main").getByRole("link", { name: /Untitled board/ });
+    await expect(sharedBoard).toHaveCount(1);
+    await sharedBoard.click();
     await b.waitForURL(boardUrl);
     await b.waitForFunction(() => window.__whiteboard?.status() === "connected");
 

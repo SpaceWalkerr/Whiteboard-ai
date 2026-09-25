@@ -221,6 +221,19 @@ function denied(actor: Actor): number {
   return actor.who === null ? 401 : 403;
 }
 
+describe("invite links", () => {
+  it("opening an invite that was already auto-accepted at sign-in just opens the board", async () => {
+    const text = server.mailer.sent.find((m) => m.to === users.viewer.email)?.text ?? "";
+    const token = /\/invite\/([\w-]+)/.exec(text)?.[1];
+    expect(token).toBeDefined();
+    const again = await api("POST", "/invites/accept", "viewer", { token });
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual({ boardId: board, role: "viewer" });
+    // Nobody else can use it, even though it has been accepted.
+    expect((await api("POST", "/invites/accept", "outsider", { token })).status).toBe(404);
+  });
+});
+
 describe("authorization matrix — REST API", () => {
   for (const actor of ACTORS) {
     it(`${actor.label}: read ${actor.can.read ? "allowed" : "denied"}`, async () => {

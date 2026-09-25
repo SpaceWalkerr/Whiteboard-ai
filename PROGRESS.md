@@ -184,10 +184,30 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
   Supabase Auth.
 - Audit: every board create/delete/restore/purge, public on/off, member add/role change/remove,
   invite create/accept/revoke and share-link create/revoke writes an `audit_logs` row.
-- Tests: server 116 (authz matrix: role × read/write/share/delete over REST and WebSocket,
+- Verified in the browser (2026-09-25, dev Supabase project): magic-link sign-in → workspace;
+  create board, draw, thumbnail on the dashboard (signed Storage URL); invite by email (link
+  in the server log) → invitee opens it → "View only"; viewer's keyboard edits and a raw
+  WebSocket Yjs update from the console are both rejected (`write_denied`, board unchanged);
+  promote to editor applies live; removing the member and revoking a share link each show
+  "Your access was removed" within ~0.75 s; sign out / sign out everywhere clear local data;
+  folders, move to folder, trash, restore; `audit_logs` has every action with its actor.
+  Bugs found and fixed while doing this (each with a regression test):
+  - Opening an invite link after sign-in had already auto-accepted it said "invalid" — accept
+    is now idempotent for the same user (never re-grants after removal).
+  - Viewers were stuck on "Saving…": `BoardStore` stamped `schemaVersion` into the doc at
+    construction (before sync), an update the server rightly drops for viewers. Now stamped
+    with the first local edit (editors also no longer write on every open).
+  - A removed member's browser kept the board in IndexedDB (openable offline): the local copy
+    and cached details are now wiped when access is revoked or the board is deleted.
+  - A new user's "Shared with me" stayed empty until reload (dashboard loaded before the
+    sign-in bootstrap accepted their invites): board lists refresh after bootstrap.
+  - Board open went from 2.8 s to 1.2 s (2,000 shapes, from here to Singapore): access is
+    resolved in one query instead of up to four, and the room ticket is requested in parallel
+    with the board details.
+- Tests: server 117 (authz matrix: role × read/write/share/delete over REST and WebSocket,
   viewer sending raw Yjs updates can't change the board, revocation kicks live sockets, links
   and public toggle, invites, audit rows, rate limits; dashboard, folders, duplicate,
-  thumbnails, purge). Shared 82, web 85. Playwright `auth.spec.ts`: magic-link sign-in (link
+  thumbnails, purge). Shared 83, web 86. Playwright 17 incl. `auth.spec.ts`: magic-link sign-in (link
   generated with the admin API), create board, invite second user who edits live; viewer via
   link is read-only; revoking the link kicks the viewer. Existing E2E specs now sign in first.
 
@@ -317,6 +337,17 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
 - **Cron endpoints live outside the user-auth scope** and use a separate `CRON_SECRET`.
 - **Server tests run files sequentially** (`fileParallelism: false`): they share one hosted dev
   database and several measure timings.
+- **Access is resolved in one SQL query** (board ⟕ membership ⟕ org membership ⟕ share link,
+  all unique keys): it runs on every request and socket upgrade; each extra query is a full
+  database round trip (~80 ms from a dev machine in India, ~1 ms on Render next to Supabase).
+- **Removing access wipes the local board copy**, but an expired session doesn't (it may hold
+  offline edits that sync after signing in again).
+- **Migration 0003 (Storage bucket) is guarded by `to_regclass('storage.buckets')`**: the
+  `storage` schema comes from Supabase's Storage service, which the bare `supabase/postgres`
+  image in CI doesn't run. Edited in place (it had only been applied to the dev project, where
+  the result is identical; drizzle doesn't re-run applied migrations).
+- **CI E2E skips with a warning until the `CI_*` secrets exist** (also on fork PRs, which get
+  no secrets) instead of failing every push.
 - **Dev email transport logs invite links** instead of sending (`EMAIL_TRANSPORT=log`);
   production refuses to boot without Resend.
 
@@ -357,9 +388,17 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
 - `pnpm test:e2e` reuses an already-running local server on :4000 / web on :4173 (faster
   locally); CI always starts fresh ones.
 
-- Phase 4 E2E tests and in-browser sign-in were not run yet: they need
-  `VITE_SUPABASE_PUBLISHABLE_KEY` (apps/web/.env) and `SUPABASE_SERVICE_ROLE_KEY`
-  (apps/server/.env), and in CI a dedicated Supabase project + the `CI_*` GitHub secrets.
+- CI E2E needs a dedicated Supabase project + the `CI_*` GitHub secrets (not set up yet);
+  until then the job is skipped with an "E2E skipped" warning — don't mistake green for run.
+- If an editor with unsynced offline edits is demoted to viewer, those edits can never be
+  saved and the status stays "Saving…" (they are discarded only when the local copy is
+  cleared). Rare; revisit with a clearer "these changes can't be saved" message.
+- Local development API latency is dominated by the round trip to the Singapore database
+  (~80 ms per query from India); production runs next to it.
+- The dev log transport prints invite links (they contain the invite token) to the server
+  log — acceptable locally; production refuses to boot with it.
+- Verification users `verify-alice@example.com` / `verify-bob@example.com` exist in the dev
+  Supabase project (plus a few boards).
 - After "sign out everywhere", an already-issued access token stays valid until it expires
   (Supabase JWTs are stateless) — set the JWT expiry to 15 min. Sockets re-check at each
   reconnect/ticket.

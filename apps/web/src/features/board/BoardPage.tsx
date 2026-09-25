@@ -135,7 +135,7 @@ export function BoardPage({
     return { ok: true, ticket: result.ticket };
   }, [fetchTicket, session]);
 
-  useLocalCache(session.controller, boardId);
+  useLocalCache(session.controller, boardId, session.status);
   useThumbnail({
     store: session.controller.store,
     boardId,

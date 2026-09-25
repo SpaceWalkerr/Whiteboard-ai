@@ -1,4 +1,5 @@
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { bootstrapResponseSchema, type Profile } from "@whiteboard/shared/api";
 import { AuthContext, type AuthState, type AuthStatus } from "./authContext";
@@ -17,6 +18,7 @@ export function AuthProvider({
   const [session, setSession] = useState<Session | null>(null);
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [profile, setProfile] = useState<Profile | null>(null);
+  const queryClient = useQueryClient();
 
   const api = useMemo(
     () =>
@@ -54,13 +56,17 @@ export function AuthProvider({
     void api
       .request("/me/bootstrap", { method: "POST", body: {}, schema: bootstrapResponseSchema })
       .then((result) => {
-        if (active) setProfile(result.profile);
+        if (!active) return;
+        setProfile(result.profile);
+        // The dashboard may have loaded before these invites were accepted.
+        if (result.acceptedInvites > 0)
+          void queryClient.invalidateQueries({ queryKey: ["boards"] });
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, [userId, api]);
+  }, [userId, api, queryClient]);
 
   const value = useMemo<AuthState>(
     () => ({

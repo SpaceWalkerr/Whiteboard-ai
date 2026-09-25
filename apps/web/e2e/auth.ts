@@ -52,7 +52,7 @@ export async function signInWithMagicLink(page: Page, user: E2EUser): Promise<vo
     `/auth/callback?token_hash=${encodeURIComponent(data.properties.hashed_token)}&type=magiclink`,
   );
   await page.waitForURL("**/app");
-  await expect(page.getByRole("heading", { name: "Your boards" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Boards", exact: true })).toBeVisible();
 }
 
 export async function deleteE2EUsers(): Promise<void> {

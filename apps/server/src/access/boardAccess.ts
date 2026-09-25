@@ -60,24 +60,63 @@ export async function resolveBoardAccess(
   boardId: string,
   caller: { userId: string | null; shareToken?: string | null; linkId?: string | null },
 ): Promise<BoardAccess | null> {
-  const [board] = await db
+  const { userId } = caller;
+  // Share links require a signed-in caller, so every use is attributable.
+  const linkMatch =
+    userId === null
+      ? null
+      : caller.shareToken
+        ? eq(shareLinks.tokenHash, hashToken(caller.shareToken))
+        : caller.linkId
+          ? eq(shareLinks.id, caller.linkId)
+          : null;
+  // One round trip: this runs on every API request and every socket upgrade, and each
+  // extra query costs a full database round trip. Every join is on a unique key, so there is
+  // at most one row.
+  const [row] = await db
     .select({
-      id: boards.id,
       orgId: boards.orgId,
       title: boards.title,
       isPublic: boards.isPublic,
       deletedAt: boards.deletedAt,
+      memberRole: boardMembers.role,
+      orgRole: memberships.role,
+      linkId: shareLinks.id,
+      linkRole: shareLinks.role,
     })
     .from(boards)
+    .leftJoin(
+      boardMembers,
+      userId === null
+        ? sql`false`
+        : and(eq(boardMembers.boardId, boards.id), eq(boardMembers.userId, userId)),
+    )
+    .leftJoin(
+      memberships,
+      userId === null
+        ? sql`false`
+        : and(eq(memberships.orgId, boards.orgId), eq(memberships.userId, userId)),
+    )
+    .leftJoin(
+      shareLinks,
+      linkMatch === null
+        ? sql`false`
+        : and(
+            linkMatch,
+            eq(shareLinks.boardId, boards.id),
+            sql`${shareLinks.revokedAt} is null`,
+            sql`(${shareLinks.expiresAt} is null or ${shareLinks.expiresAt} > now())`,
+          ),
+    )
     .where(eq(boards.id, boardId));
-  if (!board) return null;
+  if (!row) return null;
 
   const access: BoardAccess = {
     boardId,
-    orgId: board.orgId,
-    title: board.title,
-    isPublic: board.isPublic,
-    deleted: board.deletedAt !== null,
+    orgId: row.orgId,
+    title: row.title,
+    isPublic: row.isPublic,
+    deleted: row.deletedAt !== null,
     role: null,
     via: null,
     linkId: null,
@@ -94,43 +133,9 @@ export async function resolveBoardAccess(
     }
   };
 
-  if (caller.userId !== null) {
-    const [member] = await db
-      .select({ role: boardMembers.role })
-      .from(boardMembers)
-      .where(and(eq(boardMembers.boardId, boardId), eq(boardMembers.userId, caller.userId)));
-    offer(member?.role ?? null, "member");
-
-    if (board.orgId !== null) {
-      const [membership] = await db
-        .select({ role: memberships.role })
-        .from(memberships)
-        .where(and(eq(memberships.orgId, board.orgId), eq(memberships.userId, caller.userId)));
-      if (membership?.role === "owner" || membership?.role === "admin") offer("owner", "org");
-    }
-
-    // Share links require a signed-in caller, so every use is attributable.
-    const linkCondition = caller.shareToken
-      ? eq(shareLinks.tokenHash, hashToken(caller.shareToken))
-      : caller.linkId
-        ? eq(shareLinks.id, caller.linkId)
-        : null;
-    if (linkCondition) {
-      const [link] = await db
-        .select({ id: shareLinks.id, role: shareLinks.role })
-        .from(shareLinks)
-        .where(
-          and(
-            linkCondition,
-            eq(shareLinks.boardId, boardId),
-            sql`${shareLinks.revokedAt} is null`,
-            sql`(${shareLinks.expiresAt} is null or ${shareLinks.expiresAt} > now())`,
-          ),
-        );
-      if (link) offer(link.role, "link", link.id);
-    }
-  }
-
-  if (board.isPublic) offer("viewer", "public");
+  offer(row.memberRole, "member");
+  if (row.orgRole === "owner" || row.orgRole === "admin") offer("owner", "org");
+  if (row.linkId !== null) offer(row.linkRole, "link", row.linkId);
+  if (row.isPublic) offer("viewer", "public");
   return access;
 }
