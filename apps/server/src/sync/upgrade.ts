@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Logger } from "pino";
@@ -8,6 +9,8 @@ import {
   MAX_CLIENT_MESSAGE_BYTES,
   SYNC_SUBPROTOCOL,
 } from "@whiteboard/shared/sync";
+import { LocalLease, type PersistenceLease } from "../cluster/lease";
+import { LocalRoomBus, type RoomBus } from "../cluster/roomBus";
 import type { RevocationBus, RevocationEvent } from "../revocation/bus";
 import type { AuthorizeConnection } from "./auth";
 import { SyncConnection } from "./connection";
@@ -34,6 +37,20 @@ export interface SyncServerOptions {
   snapshotEvery: number;
   /** Access revocations; matching connections are closed at once. */
   revocations?: RevocationBus | undefined;
+  /**
+   * Running as one of several instances: room traffic travels over `bus` and `lease`
+   * decides who persists each room. Omitted: a single instance (always the writer).
+   */
+  cluster?: ClusterOptions | undefined;
+}
+
+export interface ClusterOptions {
+  bus: RoomBus;
+  lease: PersistenceLease;
+  /** Lease renewal / takeover interval (a third of the lease TTL). */
+  leaseRenewMs: number;
+  /** Periodic resync with the other instances. */
+  resyncMs: number;
 }
 
 export interface SyncServer {
@@ -66,6 +83,10 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     repository: options.repository,
     flushMs: options.flushMs,
     snapshotEvery: options.snapshotEvery,
+    bus: options.cluster?.bus ?? new LocalRoomBus(randomUUID()),
+    lease: options.cluster?.lease ?? new LocalLease(),
+    leaseRenewMs: options.cluster?.leaseRenewMs ?? 5_000,
+    resyncMs: options.cluster?.resyncMs ?? 15_000,
   });
   let accepting = true;
   const connections = new Set<SyncConnection>();
@@ -137,6 +158,10 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
             },
           });
           rooms.join(room, connection);
+          logger.info(
+            { boardId, userId: result.identity.userId, role: result.identity.role },
+            "sync connection opened",
+          );
           connections.add(connection);
           metrics.connectionsActive.set(connections.size);
           connection.start();

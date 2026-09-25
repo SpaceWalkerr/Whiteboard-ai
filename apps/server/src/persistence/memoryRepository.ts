@@ -3,11 +3,13 @@ import type {
   BuildSnapshot,
   CompactionResult,
   LoadedBoard,
+  NewUpdate,
   StoredUpdate,
 } from "./repository";
 
 interface MemoryBoard {
   deleted: boolean;
+  lastSeq: number;
   snapshots: { seqUpto: number; state: Uint8Array }[];
   updates: StoredUpdate[];
   archive: StoredUpdate[];
@@ -49,22 +51,25 @@ export class MemoryBoardRepository implements BoardRepository {
     });
   }
 
-  append(boardId: string, updates: readonly StoredUpdate[]): Promise<void> {
+  append(
+    boardId: string,
+    updates: readonly NewUpdate[],
+  ): Promise<{ firstSeq: number; lastSeq: number }> {
     this.appendCalls += 1;
     this.maybeFail();
+    if (updates.length === 0) return Promise.resolve({ firstSeq: 0, lastSeq: 0 });
     const board = this.boards.get(boardId) ?? {
       deleted: false,
+      lastSeq: 0,
       snapshots: [],
       updates: [],
       archive: [],
     };
-    for (const u of updates) {
-      if (board.updates.some((existing) => existing.seq === u.seq))
-        throw new Error(`duplicate seq ${u.seq}`);
-    }
-    board.updates.push(...updates);
+    const firstSeq = board.lastSeq + 1;
+    board.updates.push(...updates.map((u, i) => ({ ...u, seq: firstSeq + i })));
+    board.lastSeq += updates.length;
     this.boards.set(boardId, board);
-    return Promise.resolve();
+    return Promise.resolve({ firstSeq, lastSeq: board.lastSeq });
   }
 
   compact(boardId: string, build: BuildSnapshot): Promise<CompactionResult | null> {

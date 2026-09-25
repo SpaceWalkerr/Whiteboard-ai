@@ -1,6 +1,6 @@
 {
   "extends": "@whiteboard/config/tsconfig/node.json",
-  "include": ["src", "test", "*.ts"],
+  "include": ["src", "test", "scripts", "*.ts"],
   "compilerOptions": {
     "jsx": "react-jsx"
   }

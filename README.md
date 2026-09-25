@@ -25,7 +25,12 @@ The browser only talks to Supabase for sign-in; all data goes through `apps/serv
 - A **Supabase project for development** (free tier is fine) in region
   `ap-southeast-1` (Singapore). Keep it separate from staging/production.
 
-Nothing else is needed locally — no Docker, no local Postgres or Redis.
+`pnpm dev` needs nothing else — no Docker, no local Postgres or Redis. **`pnpm test`**
+additionally needs a Redis for the multi-instance tests (`TEST_REDIS_URL`, default
+`redis://127.0.0.1:6379`): run `redis-server` if you have it, or the scale stack's Redis
+(`docker compose -f docker-compose.scale.yml up -d redis`). The tests fail loudly without it.
+Load/scale testing tools (Redis, nginx, k6 or Docker) are described in
+[docs/scaling.md](docs/scaling.md).
 
 ## One-time setup
 
@@ -87,6 +92,8 @@ It is required in production (the server refuses to boot without it there).
 | `pnpm db:generate`                   | Generate a new SQL migration from the Drizzle schema                 |
 | `pnpm db:migrate`                    | Apply pending migrations to `DATABASE_URL` (from `apps/server/.env`) |
 | `pnpm format`                        | Prettier                                                             |
+| `pnpm scale:local` / `pnpm scale:up` | 2 server instances + nginx + Redis, natively / with Docker           |
+| `pnpm load:seed a\|b\|cleanup`       | Seed (or remove) load-test users, boards and room tickets            |
 
 A pre-commit hook (husky + lint-staged) lints and formats staged files.
 
@@ -137,6 +144,10 @@ packages/
                   migrations (src/db). Browser code may import only env/web, env and schemas.
   graph/          Canvas → graph conversion and rules engine (Phase 6; empty for now)
   config/         Shared ESLint, TypeScript and Prettier presets
+loadtest/         k6 scenarios, Node load generator and latency probe (docs/scaling.md)
+infra/scale/      nginx config + native runner for the 2-instance scale stack
+docker-compose.scale.yml  The same stack in Docker (scale/load tests only)
+docs/             Design notes (scaling.md: multi-instance sync, measurements)
 render.yaml       Render Blueprint (stub until Phase 13)
 .github/workflows CI: lint, typecheck, build, tests (Supabase Postgres image), Playwright smoke
 ```

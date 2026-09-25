@@ -1,0 +1,31 @@
+{
+  "name": "@whiteboard/loadtest",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "load:a": "node build.mjs && k6 run dist/editors-one-room.js",
+    "load:b": "node build.mjs && k6 run dist/many-rooms.js",
+    "probe": "tsx src/probe.ts",
+    "node-load": "tsx src/node-load.ts"
+  },
+  "devDependencies": {
+    "@types/k6": "2.2.1",
+    "@types/node": "catalog:",
+    "@types/ws": "8.18.1",
+    "@whiteboard/config": "workspace:*",
+    "esbuild": "0.27.7",
+    "eslint": "catalog:",
+    "lib0": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "ws": "8.21.3",
+    "y-protocols": "catalog:",
+    "yjs": "catalog:"
+  }
+}

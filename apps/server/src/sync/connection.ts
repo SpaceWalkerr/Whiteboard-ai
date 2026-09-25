@@ -203,6 +203,21 @@ export class SyncConnection implements RoomMember {
     }
   }
 
+  /**
+   * A presence client id belongs to the first connection that claims it. An id currently
+   * held by a client of another instance may be taken over only by the same signed-in user:
+   * that is the same browser tab reconnecting here after its instance went away (its old
+   * state lingers on this instance until it times out).
+   */
+  private mayClaim(clientId: number): boolean {
+    const owner = this.room.awarenessOwners.get(clientId);
+    if (owner) return owner === this;
+    if (!this.room.remoteAwareness.has(clientId)) return true;
+    const state = this.room.awareness.getStates().get(clientId) as
+      { user?: { id?: unknown } } | undefined;
+    return this.identity.userId !== null && state?.user?.id === this.identity.userId;
+  }
+
   private handleAwareness(update: Uint8Array): void {
     this.options.metrics.messages.inc({ type: "awareness" });
     const entries = readAwarenessEntries(update);
@@ -210,12 +225,15 @@ export class SyncConnection implements RoomMember {
       this.options.metrics.messages.inc({ type: "awareness_invalid" });
       return;
     }
-    const { awarenessOwners } = this.room;
-    if (entries.some(({ clientId }) => (awarenessOwners.get(clientId) ?? this) !== this)) {
+    const { awarenessOwners, remoteAwareness } = this.room;
+    if (entries.some(({ clientId }) => !this.mayClaim(clientId))) {
       this.options.metrics.messages.inc({ type: "awareness_spoofed" });
       return;
     }
-    for (const { clientId } of entries) awarenessOwners.set(clientId, this);
+    for (const { clientId } of entries) {
+      awarenessOwners.set(clientId, this);
+      remoteAwareness.delete(clientId);
+    }
     applyAwarenessUpdate(this.room.awareness, update, this);
   }
 }

@@ -1,0 +1,112 @@
+# Scale test: 2 apps/server instances behind nginx (round-robin, no sticky sessions), sharing
+# Redis and Postgres — the shape of Render running 2 instances behind its load balancer.
+#
+#   docker compose -f docker-compose.scale.yml up --build     # pnpm scale:up
+#
+# Load balancer: http://localhost:8080 (ws://localhost:8080/rooms/:id)
+# Instances directly (to force a client onto one): :4001 and :4002
+#
+# Postgres is Supabase's own image (same as CI), so load tests never touch a hosted
+# project. To run the instances against the Supabase DEV project instead (e.g. to sign in
+# from the browser), set SCALE_DATABASE_URL and SUPABASE_URL in your shell.
+# Not used for development (`pnpm dev` stays Docker-free) or deployment (render.yaml).
+
+x-server: &server
+  build:
+    context: .
+    dockerfile: apps/server/Dockerfile
+  image: whiteboard-server:scale
+  depends_on:
+    redis: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+  environment: &server-env
+    NODE_ENV: development
+    HOST: 0.0.0.0
+    PORT: "4000"
+    LOG_LEVEL: info
+    DATABASE_URL: ${SCALE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres}
+    REDIS_URL: redis://redis:6379
+    # As on Render: instances × pool must fit the Supabase pooler (15 per project).
+    DATABASE_POOL_MAX: "6"
+    CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:4173
+    SUPABASE_URL: ${SUPABASE_URL:-https://scale-test.supabase.co}
+    # Local-only secret shared by both instances (tickets from either are valid on both).
+    ROOM_TICKET_SECRET: ${SCALE_TICKET_SECRET:-scale-test-ticket-secret-0123456789abcdef}
+    APP_URL: http://localhost:5173
+    TRUST_PROXY: "1"
+  ulimits:
+    nofile: { soft: 20000, hard: 20000 }
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "node",
+        "-e",
+        "fetch('http://127.0.0.1:4000/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+      ]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command:
+      ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  postgres:
+    image: supabase/postgres:17.6.1.175
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports: ["54322:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: whiteboard-server:scale
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: ${SCALE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres}
+    command: ["pnpm", "db:migrate"]
+
+  server1:
+    <<: *server
+    environment:
+      <<: *server-env
+      INSTANCE_ID: server1
+    ports: ["4001:4000"]
+
+  server2:
+    <<: *server
+    environment:
+      <<: *server-env
+      INSTANCE_ID: server2
+    ports: ["4002:4000"]
+
+  nginx:
+    image: nginx:1.28-alpine
+    depends_on:
+      server1: { condition: service_healthy }
+      server2: { condition: service_healthy }
+    environment:
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      UPSTREAM_1: server1:4000
+      UPSTREAM_2: server2:4000
+      LISTEN_PORT: "8080"
+      RUN_DIR: /tmp
+    volumes:
+      - ./infra/scale/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    ulimits:
+      nofile: { soft: 20000, hard: 20000 }
+    ports: ["8080:8080"]

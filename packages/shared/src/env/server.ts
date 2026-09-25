@@ -19,6 +19,12 @@ export const serverEnvSchema = z
       message: "must be a postgres:// URL",
     }),
     /**
+     * Postgres connections per instance. Supabase's session pooler caps connections per
+     * project (15 on small computes), so instances × DATABASE_POOL_MAX (plus migrations and
+     * cron) must stay below that. Half of the pool at most is used for persistence writes.
+     */
+    DATABASE_POOL_MAX: z.coerce.number().int().min(2).max(100).default(10),
+    /**
      * Optional outside production for now (decided in Phase 0: local dev runs without Redis).
      * Production must have it: 2+ instances share state through Redis.
      */
@@ -97,6 +103,24 @@ export const serverEnvSchema = z
 
     /** Bearer token for GET /metrics. Optional in development, required in production. */
     METRICS_TOKEN: z.string().min(32, { message: "must be at least 32 characters" }).optional(),
+
+    /**
+     * Names this instance in logs, Redis messages and persistence leases (a random suffix
+     * is added per process). Defaults to Render's RENDER_INSTANCE_ID.
+     */
+    INSTANCE_ID: z
+      .string()
+      .regex(/^[A-Za-z0-9._-]{1,64}$/)
+      .optional(),
+    /** Set by Render on every instance. */
+    RENDER_INSTANCE_ID: z.string().min(1).max(64).optional(),
+    /**
+     * Room persistence lease TTL (Redis, multi-instance). If the writing instance dies,
+     * another one takes over within this time; renewed every third of it.
+     */
+    SYNC_LEASE_TTL_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
+    /** How often each room re-checks with the other instances for missed updates. */
+    SYNC_RESYNC_MS: z.coerce.number().int().min(1_000).max(600_000).default(15_000),
 
     /** Hard deadline for graceful shutdown; must stay below Render's shutdown window. */
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(290_000).default(25_000),

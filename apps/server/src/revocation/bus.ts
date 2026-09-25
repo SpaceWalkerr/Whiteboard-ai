@@ -53,12 +53,13 @@ const CHANNEL = "whiteboard:revocations";
  * instances. If Redis is unavailable, local delivery still happens and the failure is logged.
  */
 export class RedisRevocationBus extends LocalRevocationBus {
-  private readonly instanceId = crypto.randomUUID();
   private readonly subscriber: Redis;
 
   constructor(
     private readonly publisher: Redis,
     private readonly logger: Logger,
+    /** This instance (shared with the room bus): events it published are delivered locally. */
+    private readonly instanceId: string = crypto.randomUUID(),
   ) {
     super();
     this.subscriber = publisher.duplicate({ enableOfflineQueue: true });

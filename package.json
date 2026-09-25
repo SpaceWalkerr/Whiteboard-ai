@@ -17,7 +17,11 @@
     "db:migrate": "pnpm --filter @whiteboard/shared db:migrate",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "prepare": "husky"
+    "prepare": "husky",
+    "scale:local": "bash infra/scale/run-local.sh",
+    "scale:up": "docker compose -f docker-compose.scale.yml up --build",
+    "load:seed": "pnpm --filter @whiteboard/server load:seed",
+    "load:build": "pnpm --filter @whiteboard/loadtest build"
   },
   "devDependencies": {
     "@whiteboard/config": "workspace:*",

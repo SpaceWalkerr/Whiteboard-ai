@@ -11,7 +11,8 @@ import {
 import type { App } from "../src/app";
 import { allowAllConnections, type AuthorizeConnection } from "../src/sync/auth";
 import { createSyncMetrics, type SyncMetrics } from "../src/sync/metrics";
-import { attachSyncServer, type SyncServer } from "../src/sync/upgrade";
+import type { RevocationBus } from "../src/revocation/bus";
+import { attachSyncServer, type ClusterOptions, type SyncServer } from "../src/sync/upgrade";
 import { MemoryBoardRepository } from "../src/persistence/memoryRepository";
 import type { BoardRepository } from "../src/persistence/repository";
 import { silentLogger, testApp } from "./helpers";
@@ -41,6 +42,9 @@ export async function startServer(
     repository?: BoardRepository;
     flushMs?: number;
     snapshotEvery?: number;
+    /** One of several instances sharing rooms through Redis. */
+    cluster?: ClusterOptions;
+    revocations?: RevocationBus;
   } = {},
 ): Promise<TestServer> {
   const metrics = createSyncMetrics();
@@ -60,6 +64,8 @@ export async function startServer(
     repository: options.repository ?? new MemoryBoardRepository(),
     flushMs: options.flushMs ?? 5,
     snapshotEvery: options.snapshotEvery ?? 500,
+    cluster: options.cluster,
+    revocations: options.revocations,
   });
   await app.listen({ host: "127.0.0.1", port: options.port ?? 0 });
   const { port } = app.server.address() as AddressInfo;
@@ -88,10 +94,17 @@ export interface TestClient {
 export function connectClient(
   wsUrl: string,
   boardId: string,
-  options: { getTicket?: SyncProviderOptions["getTicket"] } = {},
+  options: {
+    getTicket?: SyncProviderOptions["getTicket"];
+    /** Fixed Yjs/awareness client id (to impersonate another client in spoofing tests). */
+    clientId?: number;
+    /** Reconnect an existing tab: same document and awareness (e.g. to another instance). */
+    reuse?: { doc: Y.Doc; awareness: Awareness };
+  } = {},
 ): TestClient {
-  const doc = new Y.Doc();
-  const awareness = new Awareness(doc);
+  const doc = options.reuse?.doc ?? new Y.Doc();
+  if (options.clientId !== undefined) doc.clientID = options.clientId;
+  const awareness = options.reuse?.awareness ?? new Awareness(doc);
   const provider = new SyncProvider({
     serverUrl: wsUrl,
     boardId,

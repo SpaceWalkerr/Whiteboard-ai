@@ -1,0 +1,8 @@
+{
+  "extends": "@whiteboard/config/tsconfig/node.json",
+  "compilerOptions": {
+    // k6 scripts use k6's globals (open, __ENV, __VU); the codec and tests use Node's.
+    "types": ["node", "k6"]
+  },
+  "include": ["src", "test", "*.ts", "*.mjs"]
+}

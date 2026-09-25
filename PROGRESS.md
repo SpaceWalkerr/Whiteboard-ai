@@ -2,8 +2,8 @@
 
 ## Current phase
 
-Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual verification
-(needs the Supabase publishable + service-role keys, see Known issues). Phases 0–3 committed.
+Phase 5 — Horizontal scaling + load testing: implemented, awaiting manual verification.
+Phases 0–4 committed.
 
 ## Done
 
@@ -211,6 +211,68 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
   generated with the admin API), create board, invite second user who edits live; viewer via
   link is read-only; revoking the link kicks the viewer. Existing E2E specs now sign in first.
 
+### Phase 5 — Horizontal scaling + load testing
+
+Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
+
+- **Rooms shared across instances** (`apps/server/src/cluster/`): one Redis pub/sub channel
+  per room (`wb:room:{boardId}`), binary zod-validated envelopes tagged with the sender's
+  instance id (own messages ignored; remote changes applied with `REMOTE_ORIGIN` and never
+  re-published → no echo loops). A room subscribes before loading from Postgres, then asks
+  peers for newer state (`syncRequest`/`syncReply`) and their clients' presence. Periodic
+  resync (`SYNC_RESYNC_MS`, 15 s) and an immediate resync after a Redis reconnect repair
+  lost pub/sub messages. `LocalRoomBus`/`LocalLease` keep single-instance development
+  without Redis unchanged.
+- **Persistence ownership:** a Redis lease per room (`SET NX PX`, Lua compare-and-set renew
+  and release, TTL `SYNC_LEASE_TTL_MS` = 15 s) picks the one writer, which persists every
+  update and relays "persisted" acknowledgements to the other instances' clients. Seqs are
+  now allocated by the database (migration `0004_board_seq_counter`: `boards.last_seq`,
+  backfilled) in a **single-statement append**, so writes are idempotent and a second writer
+  (split brain, or Redis down → fail open) can never corrupt a board. New writers (after a
+  crash or handover) and non-writers leaving a room first write a **catch-up update**
+  (exactly what the database lacks, deletions included). Graceful shutdown/eviction releases
+  the lease and announces it, so another instance takes over at once.
+- **Presence across instances:** a client id held on another instance can be reclaimed only by
+  the same signed-in user (a tab reconnecting after its instance died); cursor removal on
+  leave now reaches other instances immediately.
+- **Revocation events** use the shared instance id over Redis (tested across instances).
+- **Database pool:** `DATABASE_POOL_MAX` (6 per instance in `render.yaml`); sync persistence
+  may use at most half the pool (`LimitedWritesRepository`) so socket authorization and room
+  loads are never starved. `INSTANCE_ID` (default Render's `RENDER_INSTANCE_ID`) is in every
+  log line; a "sync connection opened" info log per socket shows which instance serves it.
+- **Metrics:** `sync_cluster_messages_total{kind,direction}`, `sync_cluster_dropped_total`,
+  `sync_rooms_writer`, `sync_lease_changes_total`, `sync_cluster_resyncs_total`.
+- **Scale stack:** `docker-compose.scale.yml` (Redis, `supabase/postgres` + migrate, 2
+  instances, nginx round-robin without stickiness on :8080, instances on :4001/:4002) with
+  `apps/server/Dockerfile` + `.dockerignore`; `pnpm scale:local` runs the same topology
+  natively (`infra/scale/run-local.sh`, same nginx template).
+- **Load tests (`loadtest/`):** k6 scenarios (a) 50 editors in one room and (b) 2,000
+  connections across 200 rooms, a dependency-free codec producing byte-identical Yjs
+  updates (tested against Yjs), a Node generator with the same traffic model for machines
+  where k6 can't drive 2,000 sockets, a latency probe, `sample.sh` + `summarize-stats.mjs`
+  for CPU/memory; `pnpm load:seed a|b|cleanup` creates real users/boards/memberships and
+  room tickets.
+- **Measured** (one Mac: generator + 2 instances + nginx + Redis; Supabase dev DB 76 ms away):
+  (a) 50 editors: propagation **p50 3 / p95 9 / p99 14 ms**, 587,801 deliveries, 0 missed,
+  0 errors, ~13 % of a core and 150 MB per instance. (b) 2,000 connections on 2 instances:
+  **p50 1 / p95 8 / p99 12 ms**, 0 failed/dropped/missed; all 2,000 on **one** instance:
+  **p95 7 ms**, 38 % of a core, 184 MB. Connection setup and "Saved" are database-bound from
+  the dev machine (see Known issues). Kill -9 failover: reconnect ~210–240 ms, 375/375 edits
+  stored; SIGTERM handover ~0.7–1.1 s.
+- **Bottlenecks found and fixed:** Supabase pooler cap (2 × 10 connections > 15 →
+  `EMAXCONNSESSION`, rejected upgrades and failed room loads); persistence writes starving
+  reads (tens of seconds to open a board under load); 4-round-trip appends (→ 1; "Saved" p50
+  842 → 312 ms in scenario a); k6's own limit on the dev Mac (~500 message-heavy sockets).
+- **Tests:** server 139 (+22): `cluster.redis.test.ts` (12: two in-process instances on a real
+  Redis — edits/cursors both ways, late joiner, no echo, lost-message repair, single
+  writer + relayed acks, handover, writer death + catch-up + cursor reclaim, split brain,
+  spoofing, revocation, malformed messages), `failover.pg.test.ts` (2 real processes behind
+  a round-robin proxy: kill -9 and SIGTERM), lease/envelope (5), concurrent seq allocation,
+  write limiter (2). Loadtest codec 5. CI gets a Redis service (`TEST_REDIS_URL`).
+- **Browser check:** the full Playwright suite (17/17) passes with every request and socket
+  round-robined across both instances by nginx; 6 boards had live clients on both instances
+  during the run, 0 server errors.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -351,6 +413,40 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
 - **Dev email transport logs invite links** instead of sending (`EMAIL_TRANSPORT=log`);
   production refuses to boot without Resend.
 
+- **Persistence: one writer per room (Redis lease) + idempotent writes (Phase 5).** The lease
+  keeps each edit written once and "Saved" exact (the writer's committed state vector is
+  relayed to every instance); database-allocated seqs + idempotent Yjs updates make a second
+  writer harmless, so correctness never depends on Redis or clocks. Rejected: every instance
+  writing its own clients' edits (exact per-client acks would need per-instance vectors, and
+  compaction would have N drivers).
+- **Fail open when Redis is unreachable:** instances write without the lease rather than
+  risk nobody persisting; duplicates are harmless. Cross-instance live updates stop until
+  Redis returns (then a resync repairs them); `/readyz` reports the outage.
+- **Catch-up write = apply our document to the stored board and keep what changes.** A
+  state-vector diff misses deletions (they don't advance vectors). Costs one board load, only
+  on writer change or when a non-writer leaves a room; falls back to the full state if the
+  read fails.
+- **Seq counter on the board row (`boards.last_seq`) + single-statement append** (CTE:
+  reserve range + insert, batch as jsonb/base64): one round trip, row-locked, contiguous.
+- **Per-room channels, binary envelopes, periodic resync (15 s)** instead of Redis Streams:
+  pub/sub is simplest and fastest; Yjs makes repair cheap and idempotent. Resync replies
+  always include the delete set (small).
+- **Instance ids get a random per-process suffix**, so a restarted instance never inherits
+  its previous life's lease.
+- **Writes ≤ half the DB pool; `DATABASE_POOL_MAX` = 6 on Render** (2 × 6 + headroom ≤ the
+  Supabase session pooler's 15). Found by the 2,000-connection test.
+- **Load-test traffic is hand-encoded, not Yjs-in-k6:** Yjs in each of 2,000 VUs costs GBs;
+  the codec's output is byte-identical to Yjs (tested). Latency is measured in steady state
+  (after ramp + settle); connection setup separately.
+- **Node generator alongside k6 (approved plan used k6):** k6 on the 8 GB dev Mac is accurate
+  up to ~500 message-heavy sockets; the 2,000-connection numbers come from a Node generator
+  with the same traffic model, cross-checked by k6 at 500 and an independent probe.
+- **Native scale stack without Docker (dev machine has no Docker):** Redis 7.4.6 and nginx
+  1.28 built from source and the k6 binary in `~/.local/bin` (outside the repo, nothing
+  system-wide); `pnpm scale:local` mirrors `docker-compose.scale.yml`.
+- **`TEST_REDIS_URL` (not `REDIS_URL`) for tests**, failing loudly when missing — like the
+  RLS test with `DATABASE_URL` — so `pnpm dev` stays Redis-free.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -381,9 +477,6 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
 - Hosted Postgres latency varies: one run saw a single compaction take 35 s (normally ~2 s) —
   a pooler/network stall. Compaction runs in the background and doesn't block editing, but
   watch `sync_flush_seconds` in production.
-- Sequence numbers come from an in-memory per-room counter: correct for one instance only.
-  Phase 5 must allocate them safely across instances (the PK rejects duplicates, so a clash
-  fails loudly rather than corrupting).
 - Storage growth from the history archive is unbounded for now (retention limits: Phase 10).
 - `pnpm test:e2e` reuses an already-running local server on :4000 / web on :4173 (faster
   locally); CI always starts fresh ones.
@@ -409,10 +502,41 @@ Phase 4 — Auth, workspaces, permissions, sharing: implemented, awaiting manual
 - Thumbnails update only when someone edits in a browser; boards edited only by API/tests
   keep no thumbnail.
 
+- **Phase 5 numbers are from one machine** (load generator, 2 instances, nginx, Redis on the
+  dev Mac; clients' network legs excluded) against the Supabase dev DB 76 ms away. Under the
+  2,000-connection load, connection setup (p95 1.2 s on 2 instances, 9.4 s on one) and
+  "Saved" (p50 7.9 s / 16.7 s) are bound by those round trips; next to the database they
+  should be a few ms and ~50 ms. Must be re-measured on Render staging (Later → Phase 13).
+- `docker-compose.scale.yml` and `apps/server/Dockerfile` have **not been run** (no Docker on
+  the dev machine); the native stack with the same nginx template was.
+- `pnpm test` now needs a local Redis (`TEST_REDIS_URL`); the multi-instance tests fail
+  loudly without one.
+- After a crash the surviving instance takes over persistence within the lease TTL (15 s):
+  edits keep flowing live meanwhile but show "Saving…" until then.
+- A crashed instance's anonymous (public-link) viewers' cursors linger up to 30 s on other
+  instances (signed-in users reclaim theirs on reconnect).
+- Catch-up writes carry no author (client/user id null) — replay (Phase 8) shows them as
+  system edits. A split brain can store duplicate updates; replay must tolerate (Yjs does).
+- Deletions don't advance Yjs state vectors, so "Saved" can show for a deletion slightly
+  before it is committed (pre-existing since Phase 3; the data is still written within the
+  batch window). Documented; revisit with per-update acks if it matters.
+- k6 can't drive 2,000 message-heavy sockets from the dev Mac; run scenario (b) with k6 from
+  separate machine(s), or use `node-load`.
+- One "sync connection opened" info log line per socket (useful to see which instance
+  serves whom); at scale consider sampling or debug level.
+- The load-test seed writes real users/boards to the database in `DATABASE_URL`; run
+  `pnpm load:seed cleanup` afterwards (it refuses outside development/test).
+
 ## Later
 
-- Phase 5: share rooms across instances via Redis pub/sub; `render.yaml` already says 2
-  instances; allocate `seq` safely across instances.
+- Phase 13: re-run the load tests against Render staging (2 instances + Key Value next to
+  Supabase) and record connection setup / "Saved" latency; tune `DATABASE_POOL_MAX` to the
+  Supabase compute's pooler size.
+- If Redis or the DB becomes the limit (docs/scaling.md → bottlenecks): coalesce presence per
+  room per tick and skip publishing for rooms no other instance holds; append several rooms'
+  batches in one statement; load a board in one query instead of three.
+- Phase 12 (security): enforce presence `user.id` == the socket's authenticated user id
+  server-side (today a client may display any id/name in its own presence).
 - Phase 8: replay = nearest `board_snapshots` row + `board_update_archive`/`board_updates` rows
   after it.
 - Phase 10: retention limits for archived history per plan.

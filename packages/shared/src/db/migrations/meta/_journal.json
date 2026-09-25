@@ -29,6 +29,13 @@
       "when": 1790302145894,
       "tag": "0003_storage_buckets",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790318927846,
+      "tag": "0004_board_seq_counter",
+      "breakpoints": true
     }
   ]
 }

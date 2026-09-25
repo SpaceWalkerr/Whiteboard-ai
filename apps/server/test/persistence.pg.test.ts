@@ -98,13 +98,13 @@ describe("Postgres persistence", () => {
     doc.getMap("shapes").set("b", 2);
     await repository.append(
       boardId,
-      log.map((update, i) => ({ seq: i + 1, update, clientId: null, userId: null })),
+      log.map((update) => ({ update, clientId: null, userId: null })),
     );
     await repository.compact(boardId, buildSnapshot);
     log.length = 0;
     doc.getMap("shapes").set("c", 3);
     await repository.append(boardId, [
-      { seq: 3, update: log[0] ?? new Uint8Array(), clientId: 7, userId: "guest-x" },
+      { update: log[0] ?? new Uint8Array(), clientId: 7, userId: "guest-x" },
     ]);
 
     const loaded = await repository.load(boardId);
@@ -156,7 +156,7 @@ describe("Postgres persistence", () => {
     }
     await repository.append(
       boardId,
-      log.map((update, i) => ({ seq: i + 1, update, clientId: null, userId: null })),
+      log.map((update) => ({ update, clientId: null, userId: null })),
     );
     await repository.compact(boardId, buildSnapshot);
 
@@ -169,5 +169,52 @@ describe("Postgres persistence", () => {
     reader.provider.destroy();
     await server.stop();
     expect(elapsed).toBeLessThan(1500);
+  });
+
+  it("allocates unique, contiguous seqs when several writers append to one board at once", async () => {
+    const boardId = await newBoard();
+    // Separate repositories, as on separate instances; the database is the only coordinator.
+    const writers = [new PgBoardRepository(db), new PgBoardRepository(db)];
+    const doc = new Y.Doc();
+    const batches: Uint8Array[][] = [];
+    for (let b = 0; b < 12; b++) {
+      const batch: Uint8Array[] = [];
+      const record = (u: Uint8Array) => batch.push(u);
+      doc.on("update", record);
+      for (let i = 0; i < 5; i++) doc.getMap("shapes").set(`b${b}-${i}`, i);
+      doc.off("update", record);
+      batches.push(batch);
+    }
+    // Compaction runs concurrently too: it locks the same row.
+    const results = await Promise.all([
+      ...batches.map((batch, i) =>
+        writers[i % writers.length]?.append(
+          boardId,
+          batch.map((update) => ({ update, clientId: null, userId: null })),
+        ),
+      ),
+      new PgBoardRepository(db).compact(boardId, buildSnapshot),
+    ]);
+
+    const ranges = results
+      .slice(0, batches.length)
+      .map((r) => r as { firstSeq: number; lastSeq: number })
+      .sort((x, y) => x.firstSeq - y.firstSeq);
+    // Every batch got its own contiguous range; together they cover 1..60 without gaps.
+    ranges.forEach((range, i) => {
+      expect(range.lastSeq - range.firstSeq).toBe(4);
+      expect(range.firstSeq).toBe(i * 5 + 1);
+    });
+    const loaded = await new PgBoardRepository(db).load(boardId);
+    const reloaded = new Y.Doc();
+    Y.applyUpdate(
+      reloaded,
+      buildSnapshot(
+        loaded.snapshot?.state ?? null,
+        loaded.updates.map((u) => u.update),
+      ),
+    );
+    expect(sameState(reloaded, doc)).toBe(true);
+    expect(loaded.maxSeq).toBe(60);
   });
 });

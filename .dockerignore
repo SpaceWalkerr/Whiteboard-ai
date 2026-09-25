@@ -1,0 +1,12 @@
+# Never send secrets or local state into an image build.
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+**/dist
+**/.turbo
+.git
+.scale-run
+loadtest/.data
+apps/web/test-results
+apps/web/playwright-report

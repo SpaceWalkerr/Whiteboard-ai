@@ -9,7 +9,8 @@
     "start": "node --enable-source-maps dist/index.js",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "load:seed": "tsx --env-file-if-exists=.env scripts/loadtest-seed.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",

@@ -19,7 +19,7 @@
     },
     "test": {
       "cache": false,
-      "passThroughEnv": ["DATABASE_URL", "CI"]
+      "passThroughEnv": ["DATABASE_URL", "TEST_REDIS_URL", "CI"]
     }
   }
 }

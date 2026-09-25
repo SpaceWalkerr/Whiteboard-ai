@@ -6,11 +6,15 @@ export class BoardMissingError extends Error {
   }
 }
 
-export interface StoredUpdate {
-  seq: number;
+/** An update to store; the repository assigns its seq. */
+export interface NewUpdate {
   update: Uint8Array;
   clientId: number | null;
   userId: string | null;
+}
+
+export interface StoredUpdate extends NewUpdate {
+  seq: number;
 }
 
 export interface LoadedBoard {
@@ -41,8 +45,16 @@ export interface CompactionResult {
  */
 export interface BoardRepository {
   load(boardId: string): Promise<LoadedBoard>;
-  /** Appends updates (creating the board row on first save) in one transaction. */
-  append(boardId: string, updates: readonly StoredUpdate[]): Promise<void>;
+  /**
+   * Appends updates in one transaction, in the given order. Seqs are allocated here, from the
+   * board row's counter under its row lock, so any number of instances may append to the
+   * same board concurrently: each batch gets a contiguous range, and no two batches clash.
+   * Returns the seqs used (empty range for no updates).
+   */
+  append(
+    boardId: string,
+    updates: readonly NewUpdate[],
+  ): Promise<{ firstSeq: number; lastSeq: number }>;
   /**
    * Folds all updates since the latest snapshot into a new snapshot and moves them to the
    * archive, in one transaction. Returns null when there is nothing to compact.

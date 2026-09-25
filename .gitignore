@@ -19,3 +19,7 @@ blob-report/
 # Personal Claude Code settings
 .claude/settings.local.json
 .claude/launch.json
+
+# Load-test seeds (contain room tickets) and results
+loadtest/.data/
+.scale-run/

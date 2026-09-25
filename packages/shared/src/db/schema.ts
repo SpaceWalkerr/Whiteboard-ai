@@ -60,6 +60,11 @@ export const boards = pgTable(
     isPublic: boolean("is_public").notNull().default(false),
     /** Object path in the private thumbnails bucket. */
     thumbnailPath: text("thumbnail_path"),
+    /**
+     * Highest board_updates.seq allocated so far. Appends reserve seqs by incrementing it
+     * under the row lock, so several sync instances can write one board safely (Phase 5).
+     */
+    lastSeq: bigint("last_seq", { mode: "number" }).notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),

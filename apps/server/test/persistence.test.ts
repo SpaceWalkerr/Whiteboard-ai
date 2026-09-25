@@ -168,7 +168,13 @@ describe("persistence", () => {
 
   it("refuses a deleted board (4404)", async () => {
     const repository = new MemoryBoardRepository();
-    repository.boards.set(BOARD, { deleted: true, snapshots: [], updates: [], archive: [] });
+    repository.boards.set(BOARD, {
+      deleted: true,
+      lastSeq: 0,
+      snapshots: [],
+      updates: [],
+      archive: [],
+    });
     const s = await server({ repository });
     const ws = await rawSocket(s.wsUrl, BOARD);
     expect(await closeCode(ws)).toBe(CLOSE_CODES.boardDeleted);

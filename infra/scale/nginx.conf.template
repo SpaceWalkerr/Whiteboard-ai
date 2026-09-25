@@ -1,0 +1,49 @@
+# Load balancer for the scale test: plain round-robin over the sync instances, no sticky
+# sessions — each new connection (HTTP request or WebSocket) may land on either instance,
+# as behind Render's load balancer. Rendered with envsubst (docker-compose.scale.yml) or
+# sed (infra/scale/run-local.sh); only ${UPSTREAM_1}, ${UPSTREAM_2}, ${LISTEN_PORT} and
+# ${RUN_DIR} are substituted.
+worker_processes auto;
+worker_rlimit_nofile 10000;
+pid ${RUN_DIR}/nginx.pid;
+error_log stderr warn;
+
+events {
+  worker_connections 8192;
+}
+
+http {
+  access_log off;
+  client_body_temp_path ${RUN_DIR}/client_body;
+  proxy_temp_path ${RUN_DIR}/proxy;
+
+  upstream whiteboard_server {
+    # Default algorithm: round-robin. Deliberately no ip_hash / sticky cookie.
+    server ${UPSTREAM_1} max_fails=1 fail_timeout=2s;
+    server ${UPSTREAM_2} max_fails=1 fail_timeout=2s;
+  }
+
+  map $http_upgrade $connection_upgrade {
+    default upgrade;
+    "" close;
+  }
+
+  server {
+    listen ${LISTEN_PORT};
+
+    location / {
+      proxy_pass http://whiteboard_server;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      # WebSockets are long-lived; the server's own heartbeat detects dead peers.
+      proxy_read_timeout 1h;
+      proxy_send_timeout 1h;
+      # A refused connection (instance down or restarting) is retried on the other one.
+      proxy_next_upstream error timeout;
+      proxy_connect_timeout 2s;
+    }
+  }
+}

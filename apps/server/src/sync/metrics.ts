@@ -59,6 +59,35 @@ export function createSyncMetrics(registry = new Registry()) {
       help: "Snapshots written by compaction",
       registers: [registry],
     }),
+    clusterMessages: new Counter({
+      name: "sync_cluster_messages_total",
+      help: "Messages exchanged with other instances over Redis, by kind and direction",
+      labelNames: ["kind", "direction"] as const,
+      registers: [registry],
+    }),
+    clusterDropped: new Counter({
+      name: "sync_cluster_dropped_total",
+      help: "Cluster messages dropped (malformed, publish failed, conflicting presence)",
+      labelNames: ["reason"] as const,
+      registers: [registry],
+    }),
+    roomsWriter: new Gauge({
+      name: "sync_rooms_writer",
+      help: "Rooms this instance currently persists (holds the persistence lease for)",
+      registers: [registry],
+    }),
+    leaseChanges: new Counter({
+      name: "sync_lease_changes_total",
+      help: "Persistence lease transitions, by change (acquired, lost, released, fail_open)",
+      labelNames: ["change"] as const,
+      registers: [registry],
+    }),
+    resyncs: new Counter({
+      name: "sync_cluster_resyncs_total",
+      help: "Resync rounds with other instances (periodic, and after a Redis reconnect)",
+      labelNames: ["reason"] as const,
+      registers: [registry],
+    }),
     closed: new Counter({
       name: "sync_connections_closed_total",
       help: "Connections closed, by close code",

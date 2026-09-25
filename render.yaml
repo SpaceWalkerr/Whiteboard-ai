@@ -31,6 +31,13 @@ services:
         generateValue: true
       - key: DATABASE_URL # Supabase pooler, SESSION mode (port 5432)
         sync: false
+      # Connections per instance. The session pooler allows ~15 per project on small computes:
+      # 2 instances × 6 leaves room for migrations and cron. Raise with the Supabase compute.
+      - key: DATABASE_POOL_MAX
+        value: "6"
+      # Persistence lease TTL: a dead instance's rooms are taken over within this time.
+      - key: SYNC_LEASE_TTL_MS
+        value: "15000"
       - key: CORS_ALLOWED_ORIGINS
         sync: false
       - key: CORS_ALLOWED_ORIGIN_PATTERN

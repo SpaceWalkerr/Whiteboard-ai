@@ -18,7 +18,7 @@ import {
   type BuildSnapshot,
   type CompactionResult,
   type LoadedBoard,
-  type StoredUpdate,
+  type NewUpdate,
 } from "./repository";
 
 export class PgBoardRepository implements BoardRepository {
@@ -58,18 +58,38 @@ export class PgBoardRepository implements BoardRepository {
     };
   }
 
-  async append(boardId: string, updates: readonly StoredUpdate[]): Promise<void> {
-    if (updates.length === 0) return;
-    await this.db.transaction(async (tx) => {
-      // Boards are created through the API (with an owner); persistence never creates one.
-      const touched = await tx
-        .update(boards)
-        .set({ updatedAt: sql`now()` })
-        .where(eq(boards.id, boardId))
-        .returning({ id: boards.id });
-      if (touched.length === 0) throw new BoardMissingError(boardId);
-      await tx.insert(boardUpdates).values(updates.map((u) => ({ boardId, ...u })));
-    });
+  async append(
+    boardId: string,
+    updates: readonly NewUpdate[],
+  ): Promise<{ firstSeq: number; lastSeq: number }> {
+    if (updates.length === 0) return { firstSeq: 0, lastSeq: 0 };
+    const rows = JSON.stringify(
+      updates.map((u) => ({
+        u: Buffer.from(u.update).toString("base64"),
+        c: u.clientId,
+        uid: u.userId,
+      })),
+    );
+    // ONE statement (one round trip, atomic on its own): reserve a contiguous seq range from
+    // the board's counter and insert the batch with it. The UPDATE takes the row lock, so
+    // concurrent appends from other instances (and compaction, which locks the same row)
+    // wait: ranges never overlap and commit in seq order. Boards are created through the API
+    // (with an owner); if the row is gone, nothing is inserted.
+    const inserted = await this.db.execute<{ seq: string | number }>(sql`
+      with reserved as (
+        update ${boards}
+        set last_seq = last_seq + ${updates.length}, updated_at = now()
+        where id = ${boardId}
+        returning last_seq
+      )
+      insert into ${boardUpdates} (board_id, seq, update, client_id, user_id)
+      select ${boardId}, reserved.last_seq - ${updates.length} + e.ord,
+             decode(e.value ->> 'u', 'base64'), (e.value ->> 'c')::bigint, e.value ->> 'uid'
+      from reserved, jsonb_array_elements(${rows}::jsonb) with ordinality as e(value, ord)
+      returning seq`);
+    const seqs = [...inserted].map((row) => Number(row.seq));
+    if (seqs.length === 0) throw new BoardMissingError(boardId);
+    return { firstSeq: Math.min(...seqs), lastSeq: Math.max(...seqs) };
   }
 
   async compact(boardId: string, build: BuildSnapshot): Promise<CompactionResult | null> {

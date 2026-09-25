@@ -55,8 +55,16 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres -h localhost" --health-interval 5s
           --health-timeout 3s --health-retries 20
+      # Multi-instance tests: two sync instances share rooms through Redis (as on Render).
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s
+          --health-retries 30
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
