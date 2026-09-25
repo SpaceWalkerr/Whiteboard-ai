@@ -2,9 +2,8 @@
 
 ## Current phase
 
-Phase 7 — AI design review: implemented, awaiting manual verification (and a first eval run
-with a real `ANTHROPIC_API_KEY`). Built on top of Phase 6, which is also still uncommitted
-(implemented, awaiting manual verification). Phases 0–5 committed.
+Phase 8 — Interview mode + session replay: implemented, awaiting manual verification.
+Phases 0–7 committed (the Phase 7 eval still needs a first run with a real `ANTHROPIC_API_KEY`).
 
 ## Done
 
@@ -411,6 +410,117 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   the browser: streamed review → numbered pins on the right shapes → click highlights; a 402
   shows the upgrade dialog).
 
+### Phase 8 — Interview mode + session replay (Team plan)
+
+- **Data** (migration `0006_interviews`, RLS on, no policies — covered by the RLS guard test):
+  `interviews` (board, starter, status active/ended, a **copy of the question incl. hints**,
+  revealed hint indexes, timer fields `duration_ms` / `started_at` / `paused_at` /
+  `paused_ms` / `ended_at`, `version`; partial unique index = one active interview per
+  board), `interview_participants` (interviewer / candidate / observer), `interview_notes`,
+  `interview_scorecards` (one per interviewer), `interview_events` (replay markers),
+  `interview_share_links` (SHA-256 hash only), and `reviews.interview_id` (cascade).
+  `PLAN_LIMITS.interviewMode` (Team only).
+- **Privacy model** (the core of the phase): anything a candidate may see is the
+  `PublicInterviewState` (question title/prompt/requirements, revealed hints, timer,
+  participant names and roles, status) — built field by field on the server
+  (`toPublicState`) and pushed to every socket in the room as a new server→client message
+  `MESSAGE_INTERVIEW = 3` (on join and after every change). **Notes, hidden hints,
+  scorecards and interview reviews never go near the socket, the Y.Doc, presence or Redis**;
+  they exist only behind REST routes that check the caller's interview role. Across
+  instances the revocation bus carries only `{type: "interview", boardId}`; each instance
+  re-reads the public state from Postgres. The question bank (with hints) is server-only
+  (`apps/server/src/interview/questionBank.ts`), so hints aren't in the public JS bundle.
+- **Roles and board permissions:** the starter is always an interviewer. Interviewers and
+  observers (who see private data) must have access to the board as members/workspace; a
+  candidate may also be someone who opened the board through a share link (a
+  `board_visits` row, written only after the ticket route authorized them) — found by the
+  E2E test, since candidates normally join by link. Default deny: anyone without an
+  explicit interviewer/observer row sees only what a candidate sees. `resolveBoardAccess`
+  (still one query) caps at **viewer**: observers of the active interview, and the candidate
+  of an ended interview (unless they take part in a new active one). Starting, changing roles
+  and ending re-ticket every candidate/observer socket (4403 → new ticket in milliseconds)
+  via the existing revocation path, so the cap applies to live WebSocket writes too. (A
+  before/after role comparison can't be used: link users have no role without their link.)
+- **Server routes** (`apps/server/src/api/interviews.ts`): `GET /interview-questions` (Team);
+  `GET /boards/:id/interview` (read access; the full question only for interviewers);
+  `POST /boards/:id/interviews` (write access + Team → 402 `PLAN_REQUIRED`; 409 if one is
+  running); `PUT /interviews/:id/participants`; `POST …/timer` (pause / resume / extend,
+  database clock); `POST …/hints/:index/reveal`; `POST …/end` (open pause folded into
+  `paused_ms`); notes `GET/POST …/notes`, `PATCH/DELETE …/notes/:noteId` (author only);
+  `GET/PUT …/scorecard` (mine; validated 1–4 + comments, recommendation, summary, draft or
+  submit); `GET …/summary` and `GET …/replay` (interviewers, observers, signed-in summary-link
+  holders — **never the candidate, even with a link**; notes only for interviewers);
+  `GET/POST/DELETE …/share-links`. Audit rows: `interview.start`, `interview.roles_change`,
+  `interview.end`, `interview.scorecard_submit`, `interview_link.create/revoke`.
+- **AI during an interview:** `POST /boards/:id/reviews` is refused (403) for anyone but
+  interviewers/observers while an interview runs; their reviews are tagged with the interview
+  and hidden from everyone else in the review list and detail routes. `POST …/hints` returns
+  no hints while an interview runs. The web app hides "Check design" and "AI review" for the
+  candidate (the rules check runs in the browser, so that part is UI-only).
+- **Replay** (`apps/server/src/interview/replay.ts` + `packages/shared/src/replay`): the base
+  is the nearest snapshot before the interview plus the archived/live updates up to its start;
+  frames are every update stored in the window, **grouped by identical `created_at`** (one
+  database batch — nobody could observe the board in between, so this is exact), Base64 in
+  JSON, capped at 100,000 updates (413). `ReplayTimeline` applies frames by storage order,
+  keeps a keyframe every 200 steps for seeking, clamps times that go backwards, and
+  `docAt(T)` = base + every frame stored at or before T. Markers: start/end, hints revealed,
+  timer changes, AI review started/finished, notes (interviewers only).
+- **Web:**
+  - "Start interview" next to the board title (signed-in editors; non-Team → upgrade
+    dialog) — not in the right-hand bar, which then slid under the toolbar and hid the
+    presence avatars (caught by the follow-mode E2E test). Dialog:
+    searchable question bank (native radios), length (30/45/60/90), roles for the signed-in
+    people currently on the board (from presence).
+  - Interview bar (everyone): question, revealed hints first (announced to screen readers),
+    requirements, participants, a shared
+    countdown (server clock offset from `serverNow`; amber < 5 min, red "over"), collapsible;
+    "View summary" for the hiring side once ended.
+  - Interviewer panel (interviewers only; mutually exclusive with the check/review panels):
+    timer pause/resume/+5 min, run AI review (pre-filled with the question), end (confirm);
+    tabs Question (reveal hints), Notes (timestamped, Ctrl/⌘+Enter, edit/delete own, other
+    interviewers' notes refetched every 10 s), Scorecard (5 dimensions × 1–4 + evidence,
+    recommendation, summary, draft/submit), People (change roles).
+  - `/interviews/:id` summary: question + which hints were given, latest AI review
+    (scores, findings), all scorecards (average, recommendation), notes (interviewers),
+    share links (`…/interviews/:id#share=<token>` — token in the fragment, kept in
+    localStorage across sign-in, cleared on sign-out), **Export PDF** (react-pdf, generated in
+    the browser, loaded on click; includes the final board as a PNG).
+  - `/interviews/:id/replay`: the board rendered through the existing SVG exporter in one
+    fixed frame for the whole session, scrubber (native range input, `aria-valuetext`),
+    play/pause (also Space), speed 1–16×, "skip idle time" (gaps > 5 s), clickable markers
+    on the track and as a list.
+- **Tests:**
+  - `interview.privacy.pg.test.ts` (acceptance): a raw candidate socket records **every
+    frame** (reconnecting with a fresh ticket when ending the interview re-tickets it) while
+    the interviewer writes/edits/deletes notes, pauses/resumes/extends, reveals hint 1, runs
+    an AI review whose text is secret, submits a scorecard and ends. No secret (UTF-8 or
+    Base64) and no unrevealed hint appears in any frame; the revealed hint and the title do
+    (proves capture works). The candidate then calls every interview/review route: 402/403
+    or public data only, and is refused the summary even with a share link. The same flow
+    runs **across two instances over Redis** (interviewer on A, candidate on B).
+  - `interview.pg.test.ts`: Team gate (402), write access, unknown question, participant
+    without board access, two candidates, one active interview (409), audit rows; observer
+    and ended-candidate ticket role = viewer and an observer's socket write is dropped;
+    interviewer-only routes (403 × roles); timer pause is idempotent and freezes the clock,
+    resume adds paused time, extend; hint reveal once, out of range 404, nothing after end
+    (409); notes author-only; scorecard validation, draft/submit, per interviewer; summary
+    notes only for interviewers, share links for outsiders, signed-out 401, revoke → 403;
+    **replay through the API equals the board at each stored moment across a compaction**
+    (base = board before the start).
+  - `packages/shared/test/replay/timeline.test.ts` (fixture): two users, creates, moves,
+    style edits, deletes, undo, concurrent edits to one shape, several edits in one batch;
+    board at every recorded T (keyframes every 1, 3, 200 steps), between moments, before the
+    first and after the last, seeking back and forth vs. incremental play, clock going
+    backwards, empty session.
+  - Web (`features/interview/__tests__`): timer maths, store (newest version wins, role,
+    clock skew, question only fetched for interviewers), bar (candidate sees no interviewer
+    tools, countdown label, summary link after end), panel (reveal, pause, arrow-key tabs),
+    replay player (seek, play, skip idle, end) and view (scrubber, markers, Space).
+  - Playwright `interview.spec.ts`: two browsers — start, reveal, candidate draws, note,
+    scorecard, end (candidate goes view-only), every WebSocket frame and HTTP response the
+    candidate's browser received checked for the note/comment/hidden hint, summary, replay
+    scrubbed to 0 shapes and to the end, candidate refused the summary URL.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -627,6 +737,30 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   - New dependency: `@anthropic-ai/sdk` 0.128.0 (server only). The board fixture builder
     moved to `packages/graph/src/testing` (exported as `@whiteboard/graph/testing`) for the eval.
 
+- **Phase 8 decisions (approved plan, all recommendations accepted):**
+  - Private data is structurally separate: public state over the socket (one builder, public
+    fields only), everything private over role-checked REST. Chosen over per-connection
+    redaction of a shared payload, which a single mistake would break.
+  - Interview state is **not** in the Y.Doc: the candidate is an editor and could rewrite it
+    (timer, revealed hints); only the server writes it.
+  - Observers are read-only and don't see notes; the candidate becomes read-only when the
+    interview ends; AI reviews/hints are off for the candidate during an interview.
+  - Question bank in server code (validated at startup), copied into each interview; custom
+    per-org questions would need a table (Later).
+  - Roles are assigned from the signed-in people present on the board (presence) — the
+    person starting may be an editor who can't list members; the server re-checks access.
+  - Notes reach other interviewers by polling (10 s), not over the socket — keeps the
+    socket free of private data by construction.
+  - Replay reads history by time window from `board_updates` ∪ `board_update_archive` +
+    `board_snapshots` (the Phase 3 retention decision); frames merged per stored batch.
+    Rendered with the existing SVG exporter (no Konva, one fixed frame for the session).
+  - PDF in the browser with `@react-pdf/renderer` 4.9.0 (new dependency, approved), lazily
+    loaded: no headless browser on Render.
+  - Summary links: token in the URL fragment (not sent to servers/logs), SHA-256 stored,
+    sign-in required, revocable, audited, never valid for the candidate.
+  - Interview events for other instances reuse the revocation bus with a payload-free
+    `interview` event rather than a second Redis channel.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -638,8 +772,9 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   (e.g. separate readiness vs. Render health semantics).
 - Rollup prints harmless "annotation that Rollup cannot interpret" warnings from zod during
   `vite build`.
-- Web bundle: main chunk ~430 kB; the board is a separate lazy chunk ~625 kB (195 kB gzip:
-  Konva, Yjs, Radix). Vite warns about chunk size. Revisit in Phase 11/12.
+- Web bundle: main chunk ~864 kB (260 kB gzip; Yjs via the offline cache, Supabase, React
+  Router); the board is a separate lazy chunk ~546 kB (169 kB gzip: Konva, Radix). Vite warns
+  about chunk size. Revisit in Phase 11/12.
 - Canvas accessibility: toolbar, palette, panel, dialogs and menus are keyboard-operable and
   labelled, every action has a shortcut, Tab cycles shapes and selection changes are announced
   in a live region — but shapes themselves are drawn on a canvas and are not exposed to screen
@@ -732,7 +867,43 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
 - Team review allowance is per seat, not yet pooled across an organization (Phase 10).
 - The "Upgrade" button is disabled ("coming soon") until billing exists (Phase 10).
 
+- **Phase 8:** the rules-based "Check design" runs in the browser, so hiding it from the
+  candidate during an interview is UI-only (a determined candidate could run the same
+  open rules locally). AI reviews and hints are enforced server-side.
+- Roles can be given only to signed-in people currently on the board (or already in the
+  interview); inviting a candidate who hasn't joined yet means starting after they join or
+  changing roles later.
+- Replay granularity is one database batch (≤ `SYNC_FLUSH_MS`, 50 ms); edits in a batch
+  appear together. "Saved" can precede the commit of a pure deletion (see Phase 3), so a
+  replay seeked to that exact instant may still show the deleted shape.
+- Replay shows board content only (no cursors or who drew what); catch-up writes have no
+  author.
+- The PDF uses react-pdf's built-in Helvetica: characters outside Latin-1 (e.g. Devanagari,
+  emoji) in labels/notes don't render. The react-pdf chunk is ~1.2 MB (455 kB gzip), loaded
+  only on "Export PDF".
+- The web bundle's main chunk is ~864 kB (260 kB gzip) — it was already ~862 kB before this
+  phase (Yjs via the offline cache and Supabase); the "~430 kB" noted in earlier phases is
+  out of date. Phase 11/12 item.
+- Notes from another interviewer appear within 10 s (polling), not instantly.
+- Starting an interview re-tickets the candidate's socket too (a sub-second "Reconnecting…").
+- At 1440 px the right-hand header bar already touches the centered toolbar (the "Saved"
+  label is partly under it); narrower windows overlap more. Pre-existing layout; Phase 11.
+- The 2,000-shape cold-load test is timing-sensitive against the hosted dev database (seen
+  from 0.77 s to 3.5 s on the same code); it can fail a full `pnpm test` run by chance.
+- Scorecards stay editable by their author after the interview ends (no lock).
+- `/boards/:id/interview` needs sign-in, so anonymous public-link viewers get the interview
+  bar only from the socket (which is all they need).
+
 ## Later
+
+- Phase 10: Team org workspaces — let org admins see every interview summary in the org;
+  per-org custom question banks (a table); lock scorecards after a hiring decision; seat-based
+  entitlement (today the person starting an interview needs a Team entitlement).
+- Session replay outside interviews for Pro (SPEC: "Session replay + PDF export", Free view
+  only) — reuse `ReplayTimeline`/`ReplayView` with a board-history route and plan checks.
+- Unscheduled: show who drew what in the replay (per-frame authors are stored); push notes to
+  other interviewers instantly over an interviewer-only channel if polling feels slow.
+- Phase 12: Sentry for replay load failures and PDF export errors.
 
 - Phase 9 (private rooms): AI review of an E2E-encrypted board needs explicit per-review
   consent and must send only the extracted graph (SPEC §7); the review route reads the board
@@ -752,8 +923,6 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   batches in one statement; load a board in one query instead of three.
 - Phase 12 (security): enforce presence `user.id` == the socket's authenticated user id
   server-side (today a client may display any id/name in its own presence).
-- Phase 8: replay = nearest `board_snapshots` row + `board_update_archive`/`board_updates` rows
-  after it.
 - Phase 10: retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
 - Unscheduled: live rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside

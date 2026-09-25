@@ -2,7 +2,8 @@ import type { Shape } from "@whiteboard/shared/board";
 import { boardToSvg } from "./svg";
 import type { MeasureText } from "./wrapText";
 
-function canvasMeasure(): MeasureText {
+/** Measures text with the page font, like the canvas does. */
+export function canvasMeasure(): MeasureText {
   const context = document.createElement("canvas").getContext("2d");
   return (text, fontSize) => {
     if (!context) return text.length * fontSize * 0.55;
@@ -11,7 +12,7 @@ function canvasMeasure(): MeasureText {
   };
 }
 
-function triggerDownload(blob: Blob, filename: string): void {
+export function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -61,14 +62,13 @@ export async function renderThumbnail(
   }
 }
 
-/** PNG is rasterized from the SVG export, so it includes shapes currently culled off-screen. */
-export async function exportPng(
+/** Rasterizes the board's SVG export to a PNG (null for an empty board). */
+export async function boardToPng(
   ordered: readonly Shape[],
-  filename = "board.png",
   pixelRatio = 2,
-): Promise<boolean> {
+): Promise<{ blob: Blob; width: number; height: number } | null> {
   const result = boardToSvg(ordered, { measure: canvasMeasure() });
-  if (!result) return false;
+  if (!result) return null;
   const url = URL.createObjectURL(new Blob([result.svg], { type: "image/svg+xml" }));
   try {
     const image = new Image();
@@ -78,16 +78,26 @@ export async function exportPng(
     canvas.width = Math.ceil(result.bounds.width * pixelRatio);
     canvas.height = Math.ceil(result.bounds.height * pixelRatio);
     const context = canvas.getContext("2d");
-    if (!context) return false;
+    if (!context) return null;
     context.scale(pixelRatio, pixelRatio);
     context.drawImage(image, 0, 0, result.bounds.width, result.bounds.height);
     const blob = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, "image/png");
     });
-    if (!blob) return false;
-    triggerDownload(blob, filename);
-    return true;
+    return blob ? { blob, width: result.bounds.width, height: result.bounds.height } : null;
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+/** PNG is rasterized from the SVG export, so it includes shapes currently culled off-screen. */
+export async function exportPng(
+  ordered: readonly Shape[],
+  filename = "board.png",
+  pixelRatio = 2,
+): Promise<boolean> {
+  const png = await boardToPng(ordered, pixelRatio);
+  if (!png) return false;
+  triggerDownload(png.blob, filename);
+  return true;
 }

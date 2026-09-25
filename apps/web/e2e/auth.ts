@@ -55,6 +55,17 @@ export async function signInWithMagicLink(page: Page, user: E2EUser): Promise<vo
   await expect(page.getByRole("heading", { name: "Boards", exact: true })).toBeVisible();
 }
 
+/**
+ * Puts a test user on a plan. The service role bypasses RLS (like apps/server's own access);
+ * it is used here only to arrange test data, never by the app.
+ */
+export async function setPlan(user: E2EUser, plan: "free" | "pro" | "team"): Promise<void> {
+  const { error } = await adminClient()
+    .from("entitlements")
+    .upsert({ user_id: user.id, plan }, { onConflict: "user_id" });
+  if (error) throw new Error(`setPlan failed: ${error.message}`);
+}
+
 export async function deleteE2EUsers(): Promise<void> {
   for (const id of created.splice(0)) await adminClient().auth.admin.deleteUser(id);
 }

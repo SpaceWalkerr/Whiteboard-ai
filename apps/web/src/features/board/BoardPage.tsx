@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ClipboardCheck, Sparkles, Users } from "lucide-react";
+import { ArrowLeft, ClipboardCheck, Sparkles, UserCheck, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { Awareness } from "y-protocols/awareness";
@@ -66,6 +66,11 @@ import {
   zoomToShapes,
 } from "./viewport/zoomActions";
 import { ViewportStore } from "./viewport/viewportStore";
+import { interviewApi, type InterviewApi } from "@/features/interview/api";
+import { InterviewBar } from "@/features/interview/InterviewBar";
+import { InterviewerPanel } from "@/features/interview/InterviewerPanel";
+import { InterviewStore } from "@/features/interview/InterviewStore";
+import { StartInterviewDialog, type Person } from "@/features/interview/StartInterviewDialog";
 
 interface BoardSession {
   controller: BoardController;
@@ -78,6 +83,8 @@ interface BoardSession {
   check: DesignCheckStore;
   review: ReviewStore;
   hints: HintsController;
+  interview: InterviewStore;
+  interviewApi: InterviewApi;
 }
 
 /** Screen area the findings panel (w-80 + margins) covers on the right… */
@@ -113,6 +120,8 @@ function createSession(
   userId: string,
   role: BoardRole,
   ai: ReturnType<typeof aiEndpoints>,
+  interviews: InterviewApi,
+  loadInterview: () => ReturnType<InterviewApi["current"]>,
 ): BoardSession {
   const store = new BoardStore({ userId });
   const history = new BoardHistory(store);
@@ -134,6 +143,8 @@ function createSession(
     check: new DesignCheckStore(store),
     review: new ReviewStore(ai.review),
     hints: new HintsController(store, ai.hints),
+    interview: new InterviewStore(userId, loadInterview),
+    interviewApi: interviews,
   };
 }
 
@@ -190,9 +201,16 @@ export function BoardPage({
   onTitleChange,
 }: BoardPageProps) {
   const { api } = useAuth();
-  const [session] = useState(() =>
-    createSession(me.id, detail.role, aiEndpoints(api, boardId, shareTokenFor(boardId))),
-  );
+  const [session] = useState(() => {
+    const interviews = interviewApi(api);
+    return createSession(
+      me.id,
+      detail.role,
+      aiEndpoints(api, boardId, shareTokenFor(boardId)),
+      interviews,
+      () => interviews.current(boardId, shareTokenFor(boardId)),
+    );
+  });
   const getTicket = useCallback(async (): Promise<TicketResult> => {
     const result = await fetchTicket();
     if (!result.ok) return result;
@@ -217,6 +235,7 @@ export function BoardPage({
     awareness: session.awareness,
     status: session.status,
     getTicket,
+    onInterviewState: session.interview.receive,
   });
   useEffect(
     () =>
@@ -289,19 +308,61 @@ function BoardView({
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
   const [hintsWanted, setHintsWanted] = useState(readHintsPreference);
-  const hintsAvailable = signedIn && !readOnly && quota.data?.liveHints === true;
+  const interview = useSyncExternalStore(session.interview.subscribe, session.interview.get);
+  const interviewActive = interview.state?.status === "active";
+  const hiringSide = interview.myRole === "interviewer" || interview.myRole === "observer";
+  // During an interview, AI help (design check, reviews, hints) is for the hiring side only.
+  // The server enforces this for reviews and hints; the check runs locally, so it is hidden.
+  const aiLocked = interviewActive && !hiringSide;
+  const [interviewPanelOpen, setInterviewPanelOpen] = useState(false);
+  const [startInterviewOpen, setStartInterviewOpen] = useState(false);
+  const [reviewPrefill, setReviewPrefill] = useState<ReviewRequest | null>(null);
+  const hintsAvailable = signedIn && !readOnly && !aiLocked && quota.data?.liveHints === true;
   const checkButtonRef = useRef<HTMLButtonElement>(null);
   const reviewButtonRef = useRef<HTMLButtonElement>(null);
   const runCheck = useCallback(() => {
+    if (aiLocked) return;
     // One results panel at a time on the right.
     session.review.close();
+    setInterviewPanelOpen(false);
     session.check.run();
-  }, [session]);
+  }, [session, aiLocked]);
   const openReview = useCallback(() => {
-    if (!signedIn) return;
+    if (!signedIn || aiLocked) return;
+    session.check.close();
+    setInterviewPanelOpen(false);
+    void session.review.open();
+  }, [session, signedIn, aiLocked]);
+  // Someone who loses AI access mid-session (an interview starts) sees its panels close.
+  useEffect(() => {
+    if (!aiLocked) return;
+    session.check.close();
+    session.review.close();
+  }, [aiLocked, session]);
+  const toggleInterviewPanel = useCallback(() => {
+    setInterviewPanelOpen((open) => {
+      if (!open) {
+        session.check.close();
+        session.review.close();
+      }
+      return !open;
+    });
+  }, [session]);
+  const runInterviewReview = useCallback(() => {
+    const question = session.interview.get().state?.question;
+    if (question)
+      setReviewPrefill({
+        problemStatement: `${question.title}: ${question.prompt}`.slice(0, 2000),
+        requirements: [...question.requirements.functional, ...question.requirements.nonFunctional]
+          .map((r) => `- ${r}`)
+          .join("\n")
+          .slice(0, 4000),
+      });
+    setInterviewPanelOpen(false);
     session.check.close();
     void session.review.open();
-  }, [session, signedIn]);
+    setReviewDialogOpen(true);
+  }, [session]);
   const closeReview = useCallback(() => {
     session.review.close();
     reviewButtonRef.current?.focus();
@@ -309,6 +370,7 @@ function BoardView({
   const startReview = useCallback(
     (request: ReviewRequest) => {
       setReviewDialogOpen(false);
+      setReviewPrefill(null);
       session.check.close();
       void session.review.start(request);
     },
@@ -443,6 +505,13 @@ function BoardView({
     ids: peer.presence.selection,
   }));
   const followed = peers.find((peer) => peer.clientId === followingClientId);
+  // Signed-in people on the board now (ids are user ids), for interview roles.
+  const people: Person[] = [];
+  for (const peer of peers) {
+    const { id, name } = peer.presence.user;
+    if (id !== me.id && UUID.test(id) && !people.some((p) => p.userId === id))
+      people.push({ userId: id, name });
+  }
 
   const onInsert = (type: SystemShapeType, connect: boolean) => {
     setInsertOpen(false);
@@ -515,6 +584,19 @@ function BoardView({
               View only
             </span>
           )}
+          {/* Here rather than in the right-hand bar, which must stay clear of the toolbar. */}
+          {signedIn && !readOnly && !interviewActive && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setStartInterviewOpen(true);
+              }}
+            >
+              <UserCheck aria-hidden="true" />
+              Start interview
+            </Button>
+          )}
         </header>
 
         <div className="absolute top-3 right-3 z-20 flex items-center gap-3 rounded-lg border bg-background py-1 pr-1 pl-3 shadow-sm">
@@ -525,18 +607,20 @@ function BoardView({
             followingClientId={followingClientId}
             onFollow={setFollowingClientId}
           />
-          <Button
-            ref={checkButtonRef}
-            size="sm"
-            variant="outline"
-            aria-keyshortcuts="Shift+C"
-            title="Check design for common problems (⇧C)"
-            onClick={runCheck}
-          >
-            <ClipboardCheck aria-hidden="true" />
-            Check design
-          </Button>
-          {signedIn && (
+          {!aiLocked && (
+            <Button
+              ref={checkButtonRef}
+              size="sm"
+              variant="outline"
+              aria-keyshortcuts="Shift+C"
+              title="Check design for common problems (⇧C)"
+              onClick={runCheck}
+            >
+              <ClipboardCheck aria-hidden="true" />
+              Check design
+            </Button>
+          )}
+          {signedIn && !aiLocked && (
             <Button
               ref={reviewButtonRef}
               size="sm"
@@ -561,6 +645,42 @@ function BoardView({
         </div>
 
         <OfflineBanner state={status} />
+        <InterviewBar
+          interview={session.interview}
+          panelOpen={interviewPanelOpen}
+          onTogglePanel={toggleInterviewPanel}
+        />
+        {interviewPanelOpen && interview.myRole === "interviewer" && interviewActive && (
+          <InterviewerPanel
+            interview={session.interview}
+            api={session.interviewApi}
+            me={{ userId: me.id, name: me.name }}
+            people={people}
+            onClose={() => {
+              setInterviewPanelOpen(false);
+            }}
+            onRunReview={runInterviewReview}
+            onEnded={() => {
+              setInterviewPanelOpen(false);
+            }}
+          />
+        )}
+        <StartInterviewDialog
+          open={startInterviewOpen}
+          onOpenChange={setStartInterviewOpen}
+          api={session.interviewApi}
+          boardId={boardId}
+          shareToken={shareTokenFor(boardId)}
+          me={{ userId: me.id, name: me.name }}
+          people={people}
+          onStarted={(view) => {
+            session.interview.applyView(view);
+            session.check.close();
+            session.review.close();
+            setInterviewPanelOpen(true);
+          }}
+          onUpgrade={setUpgradeMessage}
+        />
         <AccessLostOverlay reason={status.connection === "denied" ? status.denied : null} />
         <ShareDialog
           open={shareOpen}
@@ -638,10 +758,12 @@ function BoardView({
         <ReviewDialog
           open={reviewDialogOpen}
           onOpenChange={setReviewDialogOpen}
-          initial={{
-            problemStatement: reviewState.current?.problemStatement ?? "",
-            requirements: reviewState.current?.requirements ?? "",
-          }}
+          initial={
+            reviewPrefill ?? {
+              problemStatement: reviewState.current?.problemStatement ?? "",
+              requirements: reviewState.current?.requirements ?? "",
+            }
+          }
           saving={status.save === "saving"}
           onStart={startReview}
           onUpgrade={(message) => {
@@ -670,6 +792,8 @@ function BoardView({
     </TooltipProvider>
   );
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const HINTS_PREFERENCE_KEY = "wb:live-hints";
 

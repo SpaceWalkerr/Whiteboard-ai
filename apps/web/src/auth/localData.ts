@@ -5,6 +5,28 @@ import { boardDetailSchema, type BoardDetail } from "@whiteboard/shared/api";
 const SHARE_TOKEN_PREFIX = "whiteboard.share.";
 const BOARD_DETAIL_PREFIX = "whiteboard.board.";
 const RETURN_TO_KEY = "whiteboard.returnTo";
+const INTERVIEW_TOKEN_PREFIX = "whiteboard.interviewShare.";
+
+/**
+ * Interview summary links carry their token in the URL fragment (never sent to servers or
+ * logs). It is kept in localStorage so it survives signing in (a magic link opens a new tab);
+ * cleared on sign-out.
+ */
+export function rememberInterviewToken(interviewId: string, token: string): void {
+  try {
+    localStorage.setItem(`${INTERVIEW_TOKEN_PREFIX}${interviewId}`, token);
+  } catch {
+    // Not persisted; the link can be opened again.
+  }
+}
+
+export function interviewTokenFor(interviewId: string): string | undefined {
+  try {
+    return localStorage.getItem(`${INTERVIEW_TOKEN_PREFIX}${interviewId}`) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Share-link tokens live for this browser tab session only, keyed by board. */
 export function rememberShareToken(boardId: string, token: string): void {
@@ -75,7 +97,8 @@ export function takeReturnTo(): string {
 
 /**
  * Removes everything this app keeps on the device for the signed-in user: offline board
- * copies (IndexedDB), cached board details and share tokens. Called on sign-out.
+ * copies (IndexedDB), cached board details and share tokens (board and interview summary
+ * links). Called on sign-out.
  */
 export async function clearLocalBoardData(): Promise<void> {
   try {
@@ -83,7 +106,8 @@ export async function clearLocalBoardData(): Promise<void> {
       if (key.startsWith(SHARE_TOKEN_PREFIX)) sessionStorage.removeItem(key);
     }
     for (const key of Object.keys(localStorage)) {
-      if (key.startsWith(BOARD_DETAIL_PREFIX)) localStorage.removeItem(key);
+      if (key.startsWith(BOARD_DETAIL_PREFIX) || key.startsWith(INTERVIEW_TOKEN_PREFIX))
+        localStorage.removeItem(key);
     }
   } catch {
     // ignore

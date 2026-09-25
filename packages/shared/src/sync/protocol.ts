@@ -14,6 +14,12 @@ export const MESSAGE_AWARENESS = 1;
  * client compares it with its own document to know when its edits are durable ("Saved").
  */
 export const MESSAGE_PERSISTED = 2;
+/**
+ * Server → client only: the board's interview state (JSON, `PublicInterviewState` or null).
+ * Built by the server from public fields only and identical for every socket in the room;
+ * private interview data (notes, unrevealed hints, scorecards) is never sent over sockets.
+ */
+export const MESSAGE_INTERVIEW = 3;
 
 /**
  * WebSocket subprotocol. The room ticket travels as a second offered subprotocol
@@ -78,6 +84,12 @@ export function encodeMessage(
 export function encodeAwarenessMessage(update: Uint8Array): Uint8Array {
   return encodeMessage(MESSAGE_AWARENESS, (encoder) => {
     encoding.writeVarUint8Array(encoder, update);
+  });
+}
+
+export function encodeInterviewMessage(state: unknown): Uint8Array {
+  return encodeMessage(MESSAGE_INTERVIEW, (encoder) => {
+    encoding.writeVarString(encoder, JSON.stringify(state));
   });
 }
 

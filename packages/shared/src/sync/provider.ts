@@ -15,6 +15,7 @@ import {
   encodeMessage,
   MAX_SERVER_MESSAGE_BYTES,
   MESSAGE_AWARENESS,
+  MESSAGE_INTERVIEW,
   MESSAGE_PERSISTED,
   MESSAGE_SYNC,
   readAwarenessEntries,
@@ -71,6 +72,8 @@ export interface SyncProviderOptions {
   /** Schedules a flush of batched outgoing updates (requestAnimationFrame in browsers). */
   scheduleFlush?: (flush: () => void) => void;
   random?: () => number;
+  /** Interview state pushed by the server (unvalidated JSON; the caller validates it). */
+  onInterviewState?: (state: unknown) => void;
 }
 
 const OPEN = 1;
@@ -273,6 +276,9 @@ export class SyncProvider {
         const update = decoding.readVarUint8Array(decoder);
         if (readAwarenessEntries(update) !== null)
           applyAwarenessUpdate(this.options.awareness, update, this);
+      } else if (type === MESSAGE_INTERVIEW) {
+        const state: unknown = JSON.parse(decoding.readVarString(decoder));
+        this.options.onInterviewState?.(state);
       }
     } catch {
       // A malformed message from the server: resync from scratch.

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import type { BoardRole } from "@whiteboard/shared/api";
+import type { InterviewRole, InterviewStatus } from "@whiteboard/shared/interview";
 import {
   and,
   boardMembers,
   boards,
   eq,
+  interviewParticipants,
+  interviews,
   memberships,
   shareLinks,
   sql,
@@ -48,6 +51,11 @@ export interface BoardAccess {
   /** Where the effective role came from. */
   via: "member" | "org" | "link" | "public" | null;
   linkId: string | null;
+  /**
+   * An interview makes the caller read-only on this board: they observe the active interview,
+   * or were the candidate of an interview that has ended (the board is their submitted answer).
+   */
+  interviewCapped: boolean;
 }
 
 /**
@@ -83,6 +91,7 @@ export async function resolveBoardAccess(
       orgRole: memberships.role,
       linkId: shareLinks.id,
       linkRole: shareLinks.role,
+      interviewCapped: userId === null ? sql<boolean>`false` : interviewCap(userId),
     })
     .from(boards)
     .leftJoin(
@@ -120,6 +129,7 @@ export async function resolveBoardAccess(
     role: null,
     via: null,
     linkId: null,
+    interviewCapped: row.interviewCapped,
   };
   const offer = (
     role: BoardRole | null,
@@ -137,5 +147,27 @@ export async function resolveBoardAccess(
   if (row.orgRole === "owner" || row.orgRole === "admin") offer("owner", "org");
   if (row.linkId !== null) offer(row.linkRole, "link", row.linkId);
   if (row.isPublic) offer("viewer", "public");
+  if (access.interviewCapped && access.role !== null) access.role = "viewer";
   return access;
+}
+
+/**
+ * Whether an interview caps the caller at viewer (see BoardAccess.interviewCapped). A
+ * participant of the active interview in any other role is not capped, even if they were the
+ * candidate of an earlier interview on the same board.
+ */
+function interviewCap(userId: string) {
+  const participation = (status: InterviewStatus, roles: InterviewRole[]) => sql`exists (
+    select 1 from ${interviews} i
+    join ${interviewParticipants} p on p.interview_id = i.id
+    where i.board_id = ${boards.id} and i.status = ${status} and p.user_id = ${userId}
+      and p.role::text in (${sql.join(
+        roles.map((role) => sql`${role}`),
+        sql`, `,
+      )}))`;
+  return sql<boolean>`(case
+    when ${participation("active", ["observer"])} then true
+    when ${participation("active", ["interviewer", "candidate"])} then false
+    else ${participation("ended", ["candidate"])}
+  end)`;
 }

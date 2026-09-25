@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   customType,
@@ -11,9 +12,11 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { authUsers } from "drizzle-orm/supabase";
+import { INTERVIEW_ROLES, INTERVIEW_STATUSES } from "../interview";
 import { PLANS } from "../plans";
 
 /**
@@ -336,12 +339,21 @@ export const reviews = pgTable(
     result: jsonb("result").$type<unknown>(),
     model: text("model").notNull(),
     errorCode: text("error_code"),
+    /**
+     * Set when an interviewer (or observer) ran the review during an interview: such reviews
+     * are visible only to that interview's interviewers and observers, never the candidate.
+     */
+    // Cascade, not "set null": a null would make an interview-private review public.
+    interviewId: uuid("interview_id").references((): AnyPgColumn => interviews.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (t) => [
     index("reviews_board_id_idx").on(t.boardId, t.createdAt),
     index("reviews_requested_by_idx").on(t.requestedBy, t.createdAt),
+    index("reviews_interview_id_idx").on(t.interviewId),
   ],
 ).enableRLS();
 
@@ -392,3 +404,125 @@ export const aiUsage = pgTable(
 ).enableRLS();
 
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+// ── Phase 8: interview mode ────────────────────────────────────────────────────────────────
+
+export const interviewStatus = pgEnum("interview_status", INTERVIEW_STATUSES);
+export const interviewRole = pgEnum("interview_role", INTERVIEW_ROLES);
+
+/**
+ * A live interview on a board. The question (hints included) is copied in at start, so later
+ * edits to the question bank never change past interviews. At most one active interview per
+ * board. `version` increases with every change to what participants see.
+ */
+export const interviews = pgTable(
+  "interviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    startedBy: uuid("started_by").references(() => authUsers.id, { onDelete: "set null" }),
+    status: interviewStatus("status").notNull().default("active"),
+    question: jsonb("question").$type<unknown>().notNull(),
+    /** Indexes into question.hints that the candidate has been shown. */
+    revealedHints: jsonb("revealed_hints").$type<number[]>().notNull().default([]),
+    durationMs: integer("duration_ms").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    pausedMs: bigint("paused_ms", { mode: "number" }).notNull().default(0),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    version: integer("version").notNull().default(0),
+  },
+  (t) => [
+    index("interviews_board_id_idx").on(t.boardId, t.startedAt),
+    uniqueIndex("interviews_one_active_per_board")
+      .on(t.boardId)
+      .where(sql`${t.status} = 'active'`),
+  ],
+).enableRLS();
+
+/** Who plays which part. Anyone on the board without a row sees only what a candidate sees. */
+export const interviewParticipants = pgTable(
+  "interview_participants",
+  {
+    interviewId: uuid("interview_id")
+      .notNull()
+      .references(() => interviews.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    role: interviewRole("role").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.interviewId, t.userId] }),
+    index("interview_participants_user_id_idx").on(t.userId),
+  ],
+).enableRLS();
+
+/** Interviewers' private notes. Returned only to the interview's interviewers, over REST. */
+export const interviewNotes = pgTable(
+  "interview_notes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    interviewId: uuid("interview_id")
+      .notNull()
+      .references(() => interviews.id, { onDelete: "cascade" }),
+    authorId: uuid("author_id").references(() => authUsers.id, { onDelete: "set null" }),
+    body: text("body").notNull(),
+    ...timestamps,
+  },
+  (t) => [index("interview_notes_interview_id_idx").on(t.interviewId, t.createdAt)],
+).enableRLS();
+
+/** One rubric scorecard per interviewer. */
+export const interviewScorecards = pgTable(
+  "interview_scorecards",
+  {
+    interviewId: uuid("interview_id")
+      .notNull()
+      .references(() => interviews.id, { onDelete: "cascade" }),
+    interviewerId: uuid("interviewer_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    scores: jsonb("scores").$type<unknown>().notNull().default({}),
+    recommendation: text("recommendation"),
+    summary: text("summary").notNull().default(""),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.interviewId, t.interviewerId] })],
+).enableRLS();
+
+/** Timeline of interview actions (replay markers): hints revealed, timer changes, start/end. */
+export const interviewEvents = pgTable(
+  "interview_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    interviewId: uuid("interview_id")
+      .notNull()
+      .references(() => interviews.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    actorId: uuid("actor_id"),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("interview_events_interview_id_idx").on(t.interviewId, t.createdAt)],
+).enableRLS();
+
+/** Links to an interview's summary (sign-in required; never for the candidate). Hash only. */
+export const interviewShareLinks = pgTable(
+  "interview_share_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    interviewId: uuid("interview_id")
+      .notNull()
+      .references(() => interviews.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdBy: uuid("created_by").references(() => authUsers.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("interview_share_links_interview_id_idx").on(t.interviewId)],
+).enableRLS();

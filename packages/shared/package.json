@@ -13,7 +13,9 @@
     "./board": "./src/board/index.ts",
     "./sync": "./src/sync/index.ts",
     "./api": "./src/api/index.ts",
-    "./plans": "./src/plans.ts"
+    "./plans": "./src/plans.ts",
+    "./interview": "./src/interview/index.ts",
+    "./replay": "./src/replay/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings=0",

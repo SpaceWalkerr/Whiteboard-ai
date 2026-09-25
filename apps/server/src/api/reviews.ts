@@ -23,6 +23,7 @@ import {
   desc,
   eq,
   gt,
+  interviewParticipants,
   profiles,
   reviews,
   sql,
@@ -40,6 +41,7 @@ import { runHints, runReview, type CallOutcome } from "../ai/reviewer";
 import { recordUsage, spendTodayMicros } from "../ai/usage";
 import { requireUser } from "../auth/requestAuth";
 import {
+  ForbiddenError,
   NotFoundError,
   PayloadTooLargeError,
   PaymentRequiredError,
@@ -48,6 +50,7 @@ import {
   UnprocessableError,
 } from "../errors";
 import { authorize, shareTokenOf } from "./boards";
+import { activeInterviewContext } from "./interviews";
 import type { AiConfig, ApiDeps } from "./deps";
 import { parse } from "./validation";
 
@@ -111,10 +114,23 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * Reviews run during an interview are visible only to that interview's interviewers and
+ * observers; everyone else with access to the board (the candidate first of all) never sees
+ * them, not even in the list.
+ */
+function visibleTo(userId: string) {
+  return sql`(${reviews.interviewId} is null or exists (
+    select 1 from ${interviewParticipants} p
+    where p.interview_id = ${reviews.interviewId} and p.user_id = ${userId}
+      and p.role in ('interviewer', 'observer')))`;
+}
+
 async function loadReviewRecord(
   deps: ApiDeps,
   boardId: string,
   reviewId: string,
+  userId: string,
 ): Promise<ReviewRecord> {
   const [row] = await deps.db
     .select({
@@ -136,7 +152,7 @@ async function loadReviewRecord(
     })
     .from(reviews)
     .leftJoin(profiles, eq(profiles.id, reviews.requestedBy))
-    .where(and(eq(reviews.id, reviewId), eq(reviews.boardId, boardId)));
+    .where(and(eq(reviews.id, reviewId), eq(reviews.boardId, boardId), visibleTo(userId)));
   if (!row) throw new NotFoundError("Review not found");
   // Stored by this server after validation; re-validated on the way out anyway.
   return reviewRecordSchema.parse({
@@ -226,7 +242,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       })
       .from(reviews)
       .leftJoin(profiles, eq(profiles.id, reviews.requestedBy))
-      .where(eq(reviews.boardId, id))
+      .where(and(eq(reviews.boardId, id), visibleTo(user.id)))
       .orderBy(desc(reviews.createdAt))
       .limit(50);
     return {
@@ -250,7 +266,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
     const user = requireUser(request);
     const { id, reviewId } = parse(reviewParams, request.params);
     await authorize(deps, id, user.id, "read", { shareToken: shareTokenOf(request) });
-    return loadReviewRecord(deps, id, reviewId);
+    return loadReviewRecord(deps, id, reviewId, user.id);
   });
 
   /**
@@ -267,6 +283,11 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       const { id } = parse(idParams, request.params);
       const body = parse(reviewRequestSchema, request.body ?? {});
       await authorize(deps, id, user.id, "read", { shareToken: shareTokenOf(request) });
+      // During an interview the AI reviews for the hiring side only; the review is tagged
+      // with the interview so the candidate never sees it.
+      const interview = await activeInterviewContext(deps, id, user.id);
+      if (interview && interview.role !== "interviewer" && interview.role !== "observer")
+        throw new ForbiddenError("AI reviews are turned off for candidates during an interview.");
       const { ai, llm } = await requireAi(deps);
       if (!deps.boardStore)
         throw new ServiceUnavailableError(
@@ -294,6 +315,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
         graphFormatVersion: GRAPH_FORMAT_VERSION,
         ruleFindings: design.findings,
         model: ai.review.model,
+        interviewId: interview?.interviewId ?? null,
       });
       const log = request.log.child({ reviewId, boardId: id });
 
@@ -356,7 +378,10 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
         };
         if (completed) {
           log.info(logFields, "AI review completed");
-          stream.send({ type: "done", review: await loadReviewRecord(deps, id, reviewId) });
+          stream.send({
+            type: "done",
+            review: await loadReviewRecord(deps, id, reviewId, user.id),
+          });
         } else {
           log.warn({ ...logFields, err: call.error }, "AI review failed");
           const failure = FAILURE_MESSAGES[call.status] ?? FAILURE_MESSAGES.error;
@@ -400,6 +425,8 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       const user = requireUser(request);
       const { id } = parse(idParams, request.params);
       await authorize(deps, id, user.id, "write", { shareToken: shareTokenOf(request) });
+      // No AI help while an interview is running on this board.
+      if (await activeInterviewContext(deps, id, user.id)) return { hints: [], skipped: true };
       const entitlement = await getEntitlement(deps.db, user.id);
       if (!entitlement.liveHints)
         throw new PaymentRequiredError(

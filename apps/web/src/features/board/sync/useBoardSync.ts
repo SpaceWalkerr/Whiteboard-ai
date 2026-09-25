@@ -47,8 +47,11 @@ export function useSyncConnection(options: {
   awareness: Awareness;
   status: StatusStore;
   getTicket: () => Promise<TicketResult>;
+  /** Interview state pushed by the server (validated by the receiver). */
+  onInterviewState?: (state: unknown) => void;
 }): void {
-  const { serverUrl, boardId, controller, awareness, status, getTicket } = options;
+  const { serverUrl, boardId, controller, awareness, status, getTicket, onInterviewState } =
+    options;
   useEffect(() => {
     const provider = new SyncProvider({
       serverUrl,
@@ -58,6 +61,7 @@ export function useSyncConnection(options: {
       network: browserNetworkSignal(),
       getTicket,
       scheduleFlush: (flush) => requestAnimationFrame(flush),
+      ...(onInterviewState ? { onInterviewState } : {}),
     });
     const publish = () => {
       status.set({
@@ -72,7 +76,7 @@ export function useSyncConnection(options: {
       unsubscribe();
       provider.destroy();
     };
-  }, [serverUrl, boardId, controller, awareness, status, getTicket]);
+  }, [serverUrl, boardId, controller, awareness, status, getTicket, onInterviewState]);
 }
 
 /**

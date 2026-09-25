@@ -21,6 +21,7 @@ import { resolveInstanceId } from "./cluster/instanceId";
 import { RedisLease } from "./cluster/lease";
 import { RedisRoomBus, type RoomBusMetrics } from "./cluster/roomBus";
 import { attachSyncServer } from "./sync/upgrade";
+import { loadPublicState } from "./interview/service";
 
 function readEnvOrExit(): ServerEnv {
   try {
@@ -128,6 +129,7 @@ async function main(): Promise<void> {
     // Room ticket from the REST API, re-checked against the database on every upgrade.
     authorize: ticketAuthorizer(tickets, db),
     revocations,
+    interviewState: (boardId) => loadPublicState(db, boardId),
     logger,
     metrics,
     roomGraceMs: env.SYNC_ROOM_GRACE_MS,

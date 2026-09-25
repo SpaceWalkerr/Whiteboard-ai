@@ -20,6 +20,7 @@ import { MemoryMailer } from "../src/email/mailer";
 import { PgBoardRepository } from "../src/persistence/pgRepository";
 import { LocalRevocationBus } from "../src/revocation/bus";
 import { createSyncMetrics } from "../src/sync/metrics";
+import { loadPublicState } from "../src/interview/service";
 import { ticketAuthorizer } from "../src/sync/ticketAuth";
 import { attachSyncServer, type SyncServer } from "../src/sync/upgrade";
 import { silentLogger, testApp } from "./helpers";
@@ -123,11 +124,14 @@ export interface ApiServer {
 export async function startApiServer(
   db: Database,
   verifier: ApiDeps["verifier"],
-  extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai"> = {},
+  extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai"> & {
+    /** Share events with other instances (e.g. a RedisRevocationBus); local by default. */
+    revocations?: LocalRevocationBus;
+  } = {},
 ): Promise<ApiServer> {
   const mailer = new MemoryMailer();
   const repository = new PgBoardRepository(db);
-  const revocations = new LocalRevocationBus();
+  const { revocations = new LocalRevocationBus(), ...apiExtras } = extras;
   const tickets = new TicketIssuer(TEST_TICKET_SECRET);
   const metrics = createSyncMetrics();
   const app = testApp({
@@ -140,7 +144,7 @@ export async function startApiServer(
       logger: silentLogger,
       appUrl: "http://app.test",
       boardStore: repository,
-      ...extras,
+      ...apiExtras,
     },
   });
   const sync = attachSyncServer(app.server, {
@@ -159,6 +163,7 @@ export async function startApiServer(
     flushMs: 10,
     snapshotEvery: 500,
     revocations,
+    interviewState: (boardId) => loadPublicState(db, boardId),
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const { port } = app.server.address() as AddressInfo;

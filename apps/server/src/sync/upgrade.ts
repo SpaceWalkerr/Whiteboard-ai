@@ -6,11 +6,13 @@ import { WebSocketServer } from "ws";
 import {
   boardIdSchema,
   CLOSE_CODES,
+  encodeInterviewMessage,
   MAX_CLIENT_MESSAGE_BYTES,
   SYNC_SUBPROTOCOL,
 } from "@whiteboard/shared/sync";
 import { LocalLease, type PersistenceLease } from "../cluster/lease";
 import { LocalRoomBus, type RoomBus } from "../cluster/roomBus";
+import type { PublicInterviewState } from "@whiteboard/shared/interview";
 import type { RevocationBus, RevocationEvent } from "../revocation/bus";
 import type { AuthorizeConnection } from "./auth";
 import { SyncConnection } from "./connection";
@@ -42,6 +44,11 @@ export interface SyncServerOptions {
    * decides who persists each room. Omitted: a single instance (always the writer).
    */
   cluster?: ClusterOptions | undefined;
+  /**
+   * The board's interview as every participant may see it (public fields only), read from
+   * the database. Sent to each socket when it joins and whenever the interview changes.
+   */
+  interviewState?: ((boardId: string) => Promise<PublicInterviewState | null>) | undefined;
 }
 
 export interface ClusterOptions {
@@ -165,6 +172,9 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
           connections.add(connection);
           metrics.connectionsActive.set(connections.size);
           connection.start();
+          void room.ready.then((load) => {
+            if (load.ok) void sendInterviewState(boardId, [connection]);
+          });
         });
       },
       (error: unknown) => {
@@ -174,9 +184,24 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     );
   });
 
+  /** Loads the board's public interview state and sends it to the given sockets. */
+  const sendInterviewState = async (boardId: string, targets: SyncConnection[]) => {
+    if (!options.interviewState || targets.length === 0) return;
+    try {
+      const state = await options.interviewState(boardId);
+      if (state === null) return;
+      const message = encodeInterviewMessage({ ...state, serverNow: Date.now() });
+      for (const connection of targets) connection.send(message);
+    } catch (error) {
+      logger.error({ err: error, boardId }, "could not send interview state");
+    }
+  };
+
   const affects = (connection: SyncConnection, event: RevocationEvent): boolean => {
     if (connection.room.boardId !== event.boardId) return false;
     switch (event.type) {
+      case "interview":
+        return false;
       case "board_deleted":
         return true;
       case "member":
@@ -188,6 +213,11 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     }
   };
   const unsubscribeRevocations = options.revocations?.subscribe((event) => {
+    if (event.type === "interview") {
+      const targets = [...connections].filter((c) => c.room.boardId === event.boardId);
+      void sendInterviewState(event.boardId, targets);
+      return;
+    }
     for (const connection of connections) {
       if (!affects(connection, event)) continue;
       metrics.messages.inc({ type: "revoked" });

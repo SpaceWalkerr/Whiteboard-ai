@@ -6,6 +6,10 @@ import { z } from "zod";
  * Access changes that must end live sessions immediately. Each is published to every server
  * instance (via Redis when configured); sync connections that match are closed and must
  * fetch a new ticket, which re-checks access.
+ *
+ * `interview` is not a revocation: it tells every instance that the board's interview changed,
+ * and each one re-reads the public state from the database and sends it to its sockets. The
+ * event carries no interview data, so nothing about an interview ever passes through Redis.
  */
 export const revocationEventSchema = z.discriminatedUnion("type", [
   /** A member's role changed or they were removed. */
@@ -13,6 +17,7 @@ export const revocationEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("link"), boardId: z.uuid(), linkId: z.uuid() }),
   z.object({ type: z.literal("public_off"), boardId: z.uuid() }),
   z.object({ type: z.literal("board_deleted"), boardId: z.uuid() }),
+  z.object({ type: z.literal("interview"), boardId: z.uuid() }),
 ]);
 export type RevocationEvent = z.infer<typeof revocationEventSchema>;
 

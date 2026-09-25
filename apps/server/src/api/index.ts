@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { registerBoardExtraRoutes } from "./boardExtras";
 import { registerBoardRoutes } from "./boards";
 import { registerFolderRoutes } from "./folders";
+import { registerInterviewRoutes } from "./interviews";
 export { registerInternalRoutes } from "./internal";
 import type { ApiDeps } from "./deps";
 import { registerMeRoutes } from "./me";
@@ -29,4 +30,5 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   registerFolderRoutes(app, deps);
   registerBoardExtraRoutes(app, deps);
   registerReviewRoutes(app, deps);
+  registerInterviewRoutes(app, deps);
 }

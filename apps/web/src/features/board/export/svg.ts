@@ -18,6 +18,11 @@ export interface SvgExportOptions {
   padding?: number;
   background?: string | null;
   measure?: MeasureText;
+  /**
+   * Fixed area to show instead of fitting the content (session replay keeps one frame for
+   * the whole session so the picture doesn't jump). An empty board then renders blank.
+   */
+  frame?: Rect;
 }
 
 export interface SvgExport {
@@ -39,13 +44,16 @@ export function boardToSvg(
   const lookup: ShapeLookup = (id) => byId.get(id);
 
   const content = unionRects(ordered.map((s) => expandForStroke(shapeBounds(s, lookup), s)));
-  if (!content) return null;
-  const bounds = {
-    x: content.x - padding,
-    y: content.y - padding,
-    width: content.width + padding * 2,
-    height: content.height + padding * 2,
-  };
+  if (!content && !options.frame) return null;
+  const bounds =
+    options.frame ??
+    (content && {
+      x: content.x - padding,
+      y: content.y - padding,
+      width: content.width + padding * 2,
+      height: content.height + padding * 2,
+    });
+  if (!bounds) return null;
 
   const body = ordered.map((shape) => renderShape(shape, lookup, measure)).join("\n");
   const background =

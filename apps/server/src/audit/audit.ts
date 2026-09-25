@@ -15,14 +15,21 @@ export type AuditAction =
   | "invite.revoke"
   | "share_link.create"
   | "share_link.revoke"
-  | "entitlement.change";
+  | "entitlement.change"
+  | "interview.start"
+  | "interview.roles_change"
+  | "interview.end"
+  | "interview.scorecard_submit"
+  | "interview_link.create"
+  | "interview_link.revoke";
 
 export interface AuditEntry {
   action: AuditAction;
   actorId: string | null;
   orgId?: string | null;
   boardId?: string | null;
-  targetType: "board" | "member" | "invite" | "share_link" | "entitlement";
+  targetType:
+    "board" | "member" | "invite" | "share_link" | "entitlement" | "interview" | "interview_link";
   targetId?: string | null;
   metadata?: Record<string, unknown>;
   ip?: string | null;

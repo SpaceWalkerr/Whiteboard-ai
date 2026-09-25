@@ -7,10 +7,19 @@ import { AuthProvider } from "@/auth/AuthProvider";
 import { InvitePage, ShareLinkPage } from "@/auth/LinkLandingPages";
 import { LoadingPage, RequireAuth } from "@/auth/RequireAuth";
 import { SignInPage } from "@/auth/SignInPage";
+import { InterviewShareCapture } from "@/features/interview/shareToken";
 import { supabaseClient } from "@/lib/supabase";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { HomePage } from "@/pages/HomePage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
+
+// Interview summary and replay (Yjs, react-pdf on demand) load only when opened.
+const SummaryPage = lazy(() =>
+  import("@/features/interview/SummaryPage").then((m) => ({ default: m.SummaryPage })),
+);
+const ReplayPage = lazy(() =>
+  import("@/features/interview/replay/ReplayPage").then((m) => ({ default: m.ReplayPage })),
+);
 
 // The board pulls in Konva and Yjs; load it only when a board is opened.
 const BoardRoute = lazy(() =>
@@ -51,6 +60,30 @@ export function App({ env }: { env: WebEnv }) {
                 <RequireAuth>
                   <InvitePage />
                 </RequireAuth>
+              }
+            />
+            <Route
+              path="/interviews/:interviewId"
+              element={
+                <InterviewShareCapture>
+                  <RequireAuth>
+                    <Suspense fallback={<LoadingPage label="Loading the interview…" />}>
+                      <SummaryPage />
+                    </Suspense>
+                  </RequireAuth>
+                </InterviewShareCapture>
+              }
+            />
+            <Route
+              path="/interviews/:interviewId/replay"
+              element={
+                <InterviewShareCapture>
+                  <RequireAuth>
+                    <Suspense fallback={<LoadingPage label="Loading the replay…" />}>
+                      <ReplayPage />
+                    </Suspense>
+                  </RequireAuth>
+                </InterviewShareCapture>
               }
             />
             <Route path="/board/local" element={<Navigate to="/app" replace />} />

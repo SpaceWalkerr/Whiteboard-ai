@@ -7,6 +7,7 @@ export interface Entitlement {
   plan: Plan;
   reviewsPerMonth: number;
   liveHints: boolean;
+  interviewMode: boolean;
 }
 
 /** A reservation older than this is treated as crashed and stops holding quota. */
@@ -24,6 +25,7 @@ export async function getEntitlement(db: Database | Tx, userId: string): Promise
     plan,
     reviewsPerMonth: row?.override ?? limits.aiReviewsPerMonth,
     liveHints: limits.liveHints,
+    interviewMode: limits.interviewMode,
   };
 }
 
@@ -64,6 +66,8 @@ export interface NewReview {
   graphFormatVersion: number;
   ruleFindings: unknown;
   model: string;
+  /** Set when run during an interview (visible to its interviewers and observers only). */
+  interviewId?: string | null;
 }
 
 /**
@@ -96,6 +100,7 @@ export async function reserveReview(db: Database, review: NewReview): Promise<st
         graphFormatVersion: review.graphFormatVersion,
         ruleFindings: review.ruleFindings,
         model: review.model,
+        interviewId: review.interviewId ?? null,
       })
       .returning({ id: reviews.id });
     if (!row) throw new Error("review insert failed");
