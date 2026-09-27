@@ -1,16 +1,93 @@
 import type { Logger } from "pino";
 import * as Y from "yjs";
+import { missingFrom } from "@whiteboard/shared/sync";
 import { BoardMissingError, type BoardRepository, type NewUpdate } from "../persistence/repository";
 import type { SyncMetrics } from "./metrics";
+
+export { missingFrom };
 
 export interface Attribution {
   clientId: number | null;
   userId: string | null;
 }
 
+/**
+ * What the write-ahead queue needs to know about a room's content. Normal boards are a
+ * Y.Doc (YjsContent); private boards are a log of ciphertext the server can't read
+ * (CipherLog in encryptedRoom.ts).
+ */
+export interface PersistedContent {
+  /**
+   * Describes everything the room holds right now. Sent to clients as "persisted" once it is
+   * all committed: a Yjs state vector, or for private rooms each peer's highest counter.
+   */
+  durableMarker(): Uint8Array;
+  /**
+   * What the database lacks compared with this room (the writer changed, or a non-writer
+   * leaves), plus how many stored updates follow the latest snapshot. Throws if the stored
+   * board can't be read.
+   */
+  catchUp(): Promise<{ missing: NewUpdate[]; storedSinceSnapshot: number }>;
+  /** Fallback when catchUp can't read the database: everything, as updates to write. */
+  fullState(): NewUpdate[];
+  /** A batch was committed; its updates got seqs firstSeq, firstSeq + 1, … in order. */
+  committed(batch: readonly NewUpdate[], firstSeq: number): void;
+  /**
+   * Fold stored updates into a snapshot. Returns true when that happened now; a private
+   * room asks a client instead and reports later through RoomPersistence.snapshotInstalled.
+   */
+  compact(): Promise<boolean>;
+}
+
+/** A normal board: the room's Y.Doc, compacted by merging on the server. */
+export class YjsContent implements PersistedContent {
+  constructor(
+    private readonly doc: Y.Doc,
+    private readonly repository: BoardRepository,
+    private readonly boardId: string,
+  ) {}
+
+  durableMarker(): Uint8Array {
+    return Y.encodeStateVector(this.doc);
+  }
+
+  /**
+   * Exactly what the document has beyond the database: new content AND deletions (a deletion
+   * doesn't show in a state vector, so comparing vectors isn't enough). The stored board is
+   * rebuilt and our state applied to it; whatever that changes is missing.
+   */
+  async catchUp() {
+    const stored = await this.repository.load(this.boardId);
+    const missing = missingFrom(
+      stored.snapshot?.state ?? null,
+      stored.updates.map((u) => u.update),
+      Y.encodeStateAsUpdate(this.doc),
+    );
+    return {
+      missing:
+        missing.length === 0
+          ? []
+          : [{ update: Y.mergeUpdates(missing), clientId: null, userId: null }],
+      storedSinceSnapshot: stored.updates.length,
+    };
+  }
+
+  fullState(): NewUpdate[] {
+    return [{ update: Y.encodeStateAsUpdate(this.doc), clientId: null, userId: null }];
+  }
+
+  committed(): void {
+    // Nothing to track: the state vector says it all.
+  }
+
+  async compact(): Promise<boolean> {
+    return (await this.repository.compact(this.boardId, buildSnapshot)) !== null;
+  }
+}
+
 export interface RoomPersistenceOptions {
   boardId: string;
-  doc: Y.Doc;
+  content: PersistedContent;
   repository: BoardRepository;
   logger: Logger;
   metrics: SyncMetrics;
@@ -199,10 +276,11 @@ export class RoomPersistence {
     const batch = this.pending.splice(0, MAX_BATCH);
     // Cut point: if the whole queue fits in this batch, the current state vector is exactly
     // what becomes durable when it commits.
-    const durableVector = this.pending.length === 0 ? Y.encodeStateVector(this.options.doc) : null;
+    const durableVector = this.pending.length === 0 ? this.options.content.durableMarker() : null;
     const started = performance.now();
+    let firstSeq: number;
     try {
-      await this.options.repository.append(this.options.boardId, batch);
+      ({ firstSeq } = await this.options.repository.append(this.options.boardId, batch));
     } catch (error) {
       if (error instanceof BoardMissingError) {
         // The board was purged: nothing can ever be stored for it again.
@@ -227,6 +305,7 @@ export class RoomPersistence {
       return;
     }
     this.retryDelay = RETRY_MIN_MS;
+    this.options.content.committed(batch, firstSeq);
     this.options.metrics.flushSeconds.observe((performance.now() - started) / 1000);
     this.options.metrics.pendingUpdates.dec(batch.length);
     this.updatesSinceSnapshot += batch.length;
@@ -236,71 +315,52 @@ export class RoomPersistence {
     if (this.updatesSinceSnapshot >= this.options.snapshotEvery) await this.compactNow();
   }
 
-  /**
-   * Queue exactly what the document has beyond the database: new content AND deletions
-   * (a deletion doesn't show in a state vector, so comparing vectors isn't enough). The
-   * stored board is rebuilt and our state applied to it; whatever that changes is missing.
-   * Costs one board load, only when the writer changes or a non-writer leaves a room. If
-   * the read fails the whole document state is written instead: bigger, equally correct.
-   */
+  /** Queue whatever the database lacks compared with this room (see PersistedContent). */
   private async catchUp(): Promise<void> {
-    const { doc, repository, boardId } = this.options;
-    let missing: Uint8Array[];
+    const { content, boardId } = this.options;
+    let missing: NewUpdate[];
     try {
-      const stored = await repository.load(boardId);
-      this.updatesSinceSnapshot = stored.updates.length;
-      missing = missingFrom(
-        stored.snapshot?.state ?? null,
-        stored.updates.map((u) => u.update),
-        Y.encodeStateAsUpdate(doc),
-      );
+      const result = await content.catchUp();
+      this.updatesSinceSnapshot = result.storedSinceSnapshot;
+      missing = result.missing;
     } catch (error) {
       this.options.logger.warn(
         { err: error, boardId },
         "catch-up: could not read the stored board; writing the full document",
       );
-      missing = [Y.encodeStateAsUpdate(doc)];
+      missing = content.fullState();
     }
     if (missing.length === 0) {
       // Everything we have is already stored (the previous writer committed it before it
       // went away). Say so, or our clients would wait for an acknowledgement forever.
-      if (this.pending.length === 0) this.options.onPersisted(Y.encodeStateVector(doc));
+      if (this.pending.length === 0) this.options.onPersisted(content.durableMarker());
       return;
     }
-    const update = Y.mergeUpdates(missing);
-    this.pending.unshift({ update, clientId: null, userId: null });
-    this.options.metrics.pendingUpdates.inc();
-    this.options.logger.info({ boardId, bytes: update.byteLength }, "catch-up write queued");
+    this.pending.unshift(...missing);
+    this.options.metrics.pendingUpdates.inc(missing.length);
+    const bytes = missing.reduce((sum, u) => sum + u.update.byteLength, 0);
+    this.options.logger.info({ boardId, bytes, updates: missing.length }, "catch-up write queued");
+  }
+
+  /**
+   * A private room's client-made snapshot was stored (outside this queue, whenever the
+   * client answered): `archived` stored updates no longer follow the latest snapshot.
+   */
+  snapshotInstalled(archived: number): void {
+    this.updatesSinceSnapshot = Math.max(0, this.updatesSinceSnapshot - archived);
+    this.options.metrics.compactions.inc();
   }
 
   private async compactNow(): Promise<void> {
     try {
-      const result = await this.options.repository.compact(this.options.boardId, buildSnapshot);
-      if (result) {
+      if (await this.options.content.compact()) {
         this.updatesSinceSnapshot = 0;
         this.options.metrics.compactions.inc();
-        this.options.logger.debug({ boardId: this.options.boardId, ...result }, "compacted board");
+        this.options.logger.debug({ boardId: this.options.boardId }, "compacted board");
       }
     } catch (error) {
       // Compaction is an optimisation; updates remain safely in board_updates.
       this.options.logger.error({ err: error, boardId: this.options.boardId }, "compaction failed");
     }
   }
-}
-
-/** The updates that applying `state` to the stored board would add (empty: nothing missing). */
-export function missingFrom(
-  snapshot: Uint8Array | null,
-  updates: readonly Uint8Array[],
-  state: Uint8Array,
-): Uint8Array[] {
-  const stored = new Y.Doc();
-  if (snapshot) Y.applyUpdate(stored, snapshot);
-  for (const update of updates) Y.applyUpdate(stored, update);
-  const missing: Uint8Array[] = [];
-  // Yjs emits "update" only for changes that are new to this document.
-  stored.on("update", (update: Uint8Array) => missing.push(update));
-  Y.applyUpdate(stored, state);
-  stored.destroy();
-  return missing;
 }

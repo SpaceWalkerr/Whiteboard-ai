@@ -45,6 +45,11 @@ export interface BoardAccess {
   orgId: string | null;
   title: string;
   isPublic: boolean;
+  /** End-to-end encrypted: the server can't read its content (Phase 9). */
+  isPrivate: boolean;
+  /** Private boards: title and key check, encrypted in the browser (opaque here). */
+  encryptedTitle: Uint8Array | null;
+  keyCheck: Uint8Array | null;
   deleted: boolean;
   /** Effective role, or null when the caller has no access at all. */
   role: BoardRole | null;
@@ -86,6 +91,9 @@ export async function resolveBoardAccess(
       orgId: boards.orgId,
       title: boards.title,
       isPublic: boards.isPublic,
+      isPrivate: boards.isPrivate,
+      encryptedTitle: boards.encryptedTitle,
+      keyCheck: boards.keyCheck,
       deletedAt: boards.deletedAt,
       memberRole: boardMembers.role,
       orgRole: memberships.role,
@@ -125,6 +133,9 @@ export async function resolveBoardAccess(
     orgId: row.orgId,
     title: row.title,
     isPublic: row.isPublic,
+    isPrivate: row.isPrivate,
+    encryptedTitle: row.encryptedTitle,
+    keyCheck: row.keyCheck,
     deleted: row.deletedAt !== null,
     role: null,
     via: null,

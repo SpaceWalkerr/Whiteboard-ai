@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { Awareness } from "y-protocols/awareness";
 import {
+  EncryptedSyncProvider,
   SyncProvider,
   type Presence,
   type PresenceUser,
+  type RoomKey,
   type TicketResult,
 } from "@whiteboard/shared/sync";
 import type { BoardController } from "../controller";
@@ -24,10 +26,11 @@ export function useLocalCache(
     const cache = attachLocalCache(controller.store, boardId);
     // Removed from the board, link revoked or board deleted: don't leave a copy on this
     // device (it would still open offline). An expired session ("unauthorized") keeps it —
-    // it may hold offline edits that sync after signing in again.
+    // it may hold offline edits that sync after signing in again. Neither does a private
+    // board that can't be decrypted: the local copy may then be the only readable one.
     const unsubscribe = status.subscribe(() => {
       const { connection, denied } = status.get();
-      if (connection !== "denied" || denied === "unauthorized") return;
+      if (connection !== "denied" || denied === "unauthorized" || denied === "bad_key") return;
       unsubscribe();
       forgetBoardDetail(boardId);
       void cache.wipe();
@@ -49,20 +52,32 @@ export function useSyncConnection(options: {
   getTicket: () => Promise<TicketResult>;
   /** Interview state pushed by the server (validated by the receiver). */
   onInterviewState?: (state: unknown) => void;
+  /** A private board's key: everything is encrypted before it leaves the browser. */
+  roomKey?: RoomKey | null;
 }): void {
-  const { serverUrl, boardId, controller, awareness, status, getTicket, onInterviewState } =
-    options;
+  const {
+    serverUrl,
+    boardId,
+    controller,
+    awareness,
+    status,
+    getTicket,
+    onInterviewState,
+    roomKey,
+  } = options;
   useEffect(() => {
-    const provider = new SyncProvider({
+    const common = {
       serverUrl,
       boardId,
       doc: controller.store.doc,
       awareness,
       network: browserNetworkSignal(),
       getTicket,
-      scheduleFlush: (flush) => requestAnimationFrame(flush),
-      ...(onInterviewState ? { onInterviewState } : {}),
-    });
+      scheduleFlush: (flush: () => void) => requestAnimationFrame(flush),
+    };
+    const provider = roomKey
+      ? new EncryptedSyncProvider({ ...common, roomKey })
+      : new SyncProvider({ ...common, ...(onInterviewState ? { onInterviewState } : {}) });
     const publish = () => {
       status.set({
         connection: provider.getStatus(),
@@ -76,7 +91,7 @@ export function useSyncConnection(options: {
       unsubscribe();
       provider.destroy();
     };
-  }, [serverUrl, boardId, controller, awareness, status, getTicket, onInterviewState]);
+  }, [serverUrl, boardId, controller, awareness, status, getTicket, onInterviewState, roomKey]);
 }
 
 /**

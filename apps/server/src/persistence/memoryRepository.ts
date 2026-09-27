@@ -91,4 +91,27 @@ export class MemoryBoardRepository implements BoardRepository {
     board.updates = board.updates.filter((u) => u.seq > last.seq);
     return Promise.resolve({ seqUpto: last.seq, compacted: updates.length });
   }
+
+  installSnapshot(boardId: string, seqUpto: number, state: Uint8Array): Promise<number | null> {
+    this.maybeFail();
+    const board = this.boards.get(boardId);
+    const latest = board?.snapshots.at(-1)?.seqUpto ?? 0;
+    if (!board || seqUpto <= latest || seqUpto > board.lastSeq) return Promise.resolve(null);
+    board.snapshots.push({ seqUpto, state });
+    const archived = board.updates.filter((u) => u.seq <= seqUpto);
+    board.archive.push(...archived);
+    board.updates = board.updates.filter((u) => u.seq > seqUpto);
+    return Promise.resolve(archived.length);
+  }
+
+  updatesSince(boardId: string, afterSeq: number): Promise<StoredUpdate[]> {
+    this.maybeFail();
+    const board = this.boards.get(boardId);
+    if (!board) return Promise.resolve([]);
+    return Promise.resolve(
+      [...board.archive, ...board.updates]
+        .filter((u) => u.seq > afterSeq)
+        .sort((a, b) => a.seq - b.seq),
+    );
+  }
 }

@@ -13,7 +13,13 @@ beforeAll(async () => {
           ? { ok: false, status: 403 }
           : {
               ok: true,
-              identity: { userId: null, role: "editor", linkId: null, viaPublic: false },
+              identity: {
+                userId: null,
+                role: "editor",
+                linkId: null,
+                viaPublic: false,
+                encrypted: false,
+              },
             },
       ),
   });

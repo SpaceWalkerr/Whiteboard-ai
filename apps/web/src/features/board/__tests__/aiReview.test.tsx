@@ -507,7 +507,14 @@ describe("ReviewPanel", () => {
     const review = new ReviewStore(fakeApi());
     const onUpgrade = vi.fn();
     renderPanel(review, {
-      hints: { available: false, enabled: false, notice: null, onToggle: vi.fn(), onUpgrade },
+      hints: {
+        available: false,
+        unavailableReason: null,
+        enabled: false,
+        notice: null,
+        onToggle: vi.fn(),
+        onUpgrade,
+      },
     });
     expect(screen.getByRole("checkbox", { name: /Live hints/ })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "See plans" }));

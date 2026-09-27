@@ -2,8 +2,8 @@
 
 ## Current phase
 
-Phase 8 — Interview mode + session replay: implemented, awaiting manual verification.
-Phases 0–7 committed (the Phase 7 eval still needs a first run with a real `ANTHROPIC_API_KEY`).
+Phase 9 — End-to-end encrypted private rooms: implemented, awaiting manual verification.
+Phases 0–8 committed (the Phase 7 eval still needs a first run with a real `ANTHROPIC_API_KEY`).
 
 ## Done
 
@@ -521,6 +521,94 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
     candidate's browser received checked for the note/comment/hidden hint, summary, replay
     scrubbed to 0 shapes and to the end, candidate refused the summary URL.
 
+### Phase 9 — End-to-end encrypted private rooms (Pro/Team)
+
+Threat model, what the server can and cannot see, and limitations: [docs/security.md](docs/security.md).
+
+- **Data** (migration `0007_private_boards`, applied to the dev project): `boards.is_private`,
+  `encrypted_title`, `key_check` (CHECK: private ⇔ key check set; only private boards have an
+  encrypted title); `reviews.graph` nullable (a content-free quota reservation for unstored
+  private reviews). `PLAN_LIMITS.privateRooms` (Pro, Team).
+- **Crypto** (`packages/shared/src/sync/e2e.ts`, WebCrypto — same code in browsers and Node):
+  32-byte AES-GCM-256 key made in the browser, in the URL fragment (`#key=<base64url>`);
+  envelope `version ‖ 12-byte random IV ‖ ciphertext+tag`; AAD `wb:e2e:v1:<kind>:<boardId>`
+  (kinds update/snapshot/awareness/title/keycheck); a key check stored at creation verifies a
+  key before anything is written with it.
+- **Sync protocol for private rooms** (`encryptedProtocol.ts`, messages 4–10): welcome (peer
+  id), encrypted state (snapshot + updates), updates with a per-connection counter, presence
+  envelopes relayed with the peer id, peer-left, snapshot request/reply. "Saved" reuses
+  `MESSAGE_PERSISTED` with a peer → counter vector.
+- **Client** (`EncryptedSyncProvider`): the transport (tickets, backoff, online/offline,
+  denial) moved from `SyncProvider` into a shared `RoomSocket` base class (SyncProvider's API
+  unchanged). Strictly ordered decrypt/apply and encrypt/send queues; on (re)connect applies
+  the stored board and sends exactly what the server lacks (`missingFrom`, now in shared);
+  presence client ids bound to the peer that sent them; one undecryptable update/presence is
+  skipped and counted, an undecryptable snapshot or board → `denied: bad_key`.
+- **Server:** `EncryptedRoom` + `EncryptedConnection` beside `Room` + `SyncConnection`
+  (`RoomManager` holds both through a `ManagedRoom` interface; `RoomConnection` base class for
+  transport concerns). The room is chosen from `boards.is_private` read in the upgrade's
+  database re-check, never from the client. Plain Yjs in a private room / envelopes in a normal
+  room → 1007; viewers' updates and snapshots dropped; counters must increase; envelope shape
+  checked. `RoomPersistence` now takes a `PersistedContent` adapter (`YjsContent` = previous
+  behaviour; `CipherLog` = hash-identified ciphertext log: idempotent relays, catch-up by hash
+  against `updatesSince`, commits tag seqs). **Client snapshots:** after
+  `SNAPSHOT_EVERY_UPDATES`, the writer verifies from the database that its log holds every
+  stored update up to the last committed seq, then asks one synced editor on its instance for
+  an encrypted snapshot of that seq; `installSnapshot` stores it and archives the covered
+  updates in one transaction (refuses non-private boards, stale or future seqs). `compact`
+  refuses private boards. Cross-instance: same Redis bus/lease; resync exchanges 8-byte hash
+  prefixes; new cluster kind `peerLeft`.
+- **API:** `POST /boards` with `private: {id, keyCheck, encryptedTitle}` (Pro/Team else 402;
+  browser-chosen UUID, 409 if taken; placeholder title "Private board"; audit
+  `{private: true}`); board detail/list return `isPrivate`, `encryptedTitle`, `keyCheck`;
+  `PATCH` takes `encryptedTitle` (plaintext title refused for private boards and vice versa);
+  search excludes private boards. 409 `PRIVATE_BOARD` for thumbnail upload, duplicate, live
+  hints, public toggle, starting an interview. **AI review:** a private board requires
+  `private: {graph, consent: true, store}`; the server validates the graph, runs the rules
+  itself, and with `store: false` keeps only the content-free `ai_usage` row (reservation
+  deleted; the review is streamed back only); a normal board refuses a client graph.
+- **Web:** "New private board" on the dashboard (402 → upgrade dialog) → board opens with
+  `#key=…` and a "Save this board's link" dialog (warning + copy + "I've saved it" before
+  starting). `PrivateBoardGate`: key from the fragment, else remembered on the device
+  (IndexedDB `whiteboard:keys`), verified with the key check, else a "paste the link" screen
+  (wrong key explained). "End-to-end encrypted" badge (explains what's off). Share dialog:
+  "Copy link with key", share links carry the key, public toggle disabled with the reason,
+  invite note (emails never contain the key), key-loss warning. `/s/:token`, `/invite/:token`
+  and sign-in keep the fragment. Dashboard: lock instead of a thumbnail (with the reason),
+  titles decrypted locally, rename re-encrypts, duplicate disabled ("not for encrypted
+  boards"), search note; sign-out warns when keys would be forgotten (they're wiped with the
+  other local data). AI review dialog: per-review consent (never pre-ticked) + opt-in "Keep
+  this review on the server"; the graph is extracted in the browser at start. Live hints show
+  why they're off; "Start interview" hidden; no thumbnails uploaded.
+- **Tests:**
+  - `private.pg.test.ts` (acceptance, real API + Postgres): Free → 402; owner and invited
+    editor collaborate (concurrent edits, deletion, presence, Saved); client snapshots +
+    archive happen; after eviction **every** `board_updates` / `board_snapshots` /
+    `board_update_archive` blob, the encrypted title and key check are envelopes that aren't a
+    Yjs update and contain no label/name as UTF-8, UTF-16 or base64; title is the placeholder;
+    audit rows contain no content; a fresh client with the key rebuilds the exact board; a
+    wrong key → `bad_key`, nothing learned. Guards (409 × 5, title rules, search). Private AI
+    review: no consent / consent false / graph on a normal board → 400 without a model call;
+    unstored → streamed review, no `reviews` row, one `ai_usage` row, empty list; stored →
+    saved.
+  - `private.test.ts` (in-memory, 9): collaboration + Saved + presence/peer-left, reconnect
+    with offline edits incl. deletions, compaction via client snapshots + reload after
+    eviction, wrong key, protocol mixing refused (1007), viewer writes/snapshots and
+    unsolicited snapshots dropped, counter going backwards, plain client learns nothing, and a
+    positive control proving the opacity check catches plaintext.
+  - `private.redis.test.ts` (two instances, real Redis, 3): cross-instance collaboration,
+    presence and peer-left, single writer, each update stored once; lost pub/sub message
+    repaired by resync; writer shutdown → the other instance persists.
+  - Shared `e2e.test.ts` (8): key format/refusals, round trip + fresh IVs, wrong key/board/kind
+    and every flipped bit fail, title/key check, base64 helpers, protocol codec, peer ids.
+  - Web `privateBoards.test.tsx` (12): fragment parsing/links/paste, keyring + sign-out wipe,
+    `unlockBoard`, gate (link, remembered, wrong key → paste), save-key dialog, review consent.
+  - Playwright `private.spec.ts`: owner (Pro) creates a private board → save-link dialog →
+    editor share link with key → friend joins through `/s/…#key=…` → both label shapes and see
+    each other's → Saved; **every request URL/body, WebSocket frame and response of both
+    browsers** is free of the labels and the key; with the device key wiped the board asks for
+    the link and opens after pasting it. Full E2E suite: 22/22.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -761,6 +849,27 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   - Interview events for other instances reuse the revocation bus with a payload-free
     `interview` event rather than a second Redis channel.
 
+- **Phase 9 decisions (approved plan, all recommendations accepted):**
+  - Keys are remembered on the device (IndexedDB) so the dashboard can open private boards and
+    show their titles; wiped on sign-out after a warning. Without it every open would need the
+    link.
+  - Public links and interviews are off for private boards (Later if wanted).
+  - Privacy is chosen at creation and never changes, so a room's protocol can't switch under
+    live connections; the server decides it from the database, not from the client.
+  - The browser picks a private board's id (the AAD binds envelopes to it, so the key check
+    and title must be encrypted before the row exists); an existing id is refused (409).
+  - Snapshots come from clients on request with a server-chosen seq (not on the clients'
+    initiative): the server knows exactly which stored updates a snapshot covers, and a
+    snapshot is only asked of a connection that has provably received all of them.
+  - "Saved" for private rooms = per-connection counters (the server can't compute state
+    vectors); reconnects recompute what's missing from the stored board, so counters never
+    need to survive a connection.
+  - Undecryptable single messages are skipped (a corrupt or foreign message must not lock
+    everyone out); the key is verified up front, so "nothing decrypts" means a wrong key.
+  - Unstored private reviews keep a content-free reservation row during the call (the quota
+    lock needs it) and delete it at the end; `ai_usage` still counts the review.
+  - No new dependencies (WebCrypto is built in).
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -890,12 +999,39 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   label is partly under it); narrower windows overlap more. Pre-existing layout; Phase 11.
 - The 2,000-shape cold-load test is timing-sensitive against the hosted dev database (seen
   from 0.77 s to 3.5 s on the same code); it can fail a full `pnpm test` run by chance.
+  On 2026-09-27 it failed on every run (1.7–2.1 s with Phase 9, and 1.9 s / 4.3 s with the
+  Phase 8 commit checked out, database round trip a normal ~88 ms): network throughput to
+  Supabase, not a regression. Everything else in `pnpm test` passed (server 225/226).
 - Scorecards stay editable by their author after the interview ends (no lock).
 - `/boards/:id/interview` needs sign-in, so anonymous public-link viewers get the interview
   bar only from the socket (which is all they need).
 
+- **Phase 9:** see docs/security.md → Limitations. In short: web code delivery must be
+  trusted; losing every copy of the link (and every device key) loses the board; no key
+  rotation (removing someone stops their sync but they may keep the key and old content);
+  metadata (who/when/sizes) is visible; the server can withhold or roll back updates; editors
+  are trusted with content (a bad snapshot is recoverable only from the archive); local
+  IndexedDB copies and keys are plaintext on the device until sign-out.
+- A signed-out visitor opening a private link keeps the key through sign-in on the same tab
+  (fragment in the return path) and on the device (keyring), but a magic link that opens in a
+  new tab doesn't return to the board (pre-existing return-path behaviour) — they reopen the
+  link after signing in.
+- Private rooms on a non-writer instance keep their whole in-memory log until eviction (client
+  snapshots trim only the writer's), so newcomers served there get a bigger first sync.
+- Compaction of a private board needs an editor connected to the writer instance; a board
+  edited only through the other instance compacts once such an editor connects there.
+- A private review that isn't stored exists only in that browser session; "Compare with the
+  previous review" works only against stored reviews.
+- The "Duplicate" item is shown disabled for private boards; a browser-side duplicate
+  (decrypt → re-encrypt under a new key) is possible later.
+
 ## Later
 
+- Phase 9 follow-ups: key rotation (re-encrypt into a new board/key and revoke the old),
+  browser-side duplicate/export of private boards, the account "export all my boards" must
+  skip or export private boards as ciphertext, optional padding of envelopes, code-delivery
+  integrity (SRI / published build hashes), public read-only private links (with key) and
+  interviews on private boards (client-side replay) if customers ask.
 - Phase 10: Team org workspaces — let org admins see every interview summary in the org;
   per-org custom question banks (a table); lock scorecards after a hiring decision; seat-based
   entitlement (today the person starting an interview needs a Team entitlement).
@@ -905,9 +1041,6 @@ Full write-up with diagrams and numbers: [docs/scaling.md](docs/scaling.md).
   other interviewers instantly over an interviewer-only channel if polling feels slow.
 - Phase 12: Sentry for replay load failures and PDF export errors.
 
-- Phase 9 (private rooms): AI review of an E2E-encrypted board needs explicit per-review
-  consent and must send only the extracted graph (SPEC §7); the review route reads the board
-  server-side today, which won't work for ciphertext.
 - Phase 10: pooled Team AI allowance; the upgrade dialog's button → checkout; plan changes
   via billing webhooks (audited), not the dev script; ai_usage-based cost dashboard.
 - Phase 12: Sentry for AI failures (refusals, invalid output rate), PostHog events for review

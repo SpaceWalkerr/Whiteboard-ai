@@ -1,13 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import type { BoardDetail } from "@whiteboard/shared/api";
 import { boardMembers, boards, boardSnapshots, eq } from "@whiteboard/shared/db";
 import { audit } from "../audit/audit";
 import { requireUser } from "../auth/requestAuth";
 import { AppError, BadRequestError } from "../errors";
 import { buildSnapshot } from "../sync/roomPersistence";
 import { thumbnailPath } from "../storage/thumbnails";
-import { authorize, shareTokenOf } from "./boards";
+import { authorize, boardDetail, refuseIfPrivate, shareTokenOf } from "./boards";
 import type { ApiDeps } from "./deps";
 import { parse } from "./validation";
 import { ensureWorkspace } from "./workspace";
@@ -37,6 +36,10 @@ export function registerBoardExtraRoutes(app: FastifyInstance, deps: ApiDeps): v
     const source = await authorize(deps, id, user.id, "read", {
       shareToken: shareTokenOf(request),
     });
+    refuseIfPrivate(
+      source,
+      "Private boards can't be duplicated: the server can't read their content to copy it.",
+    );
     if (!deps.boardStore)
       throw new AppError(503, "UNAVAILABLE", "Duplicating boards is not available right now.");
     const loaded = await deps.boardStore.load(id);
@@ -55,33 +58,43 @@ export function registerBoardExtraRoutes(app: FastifyInstance, deps: ApiDeps): v
           orgId,
           title: `Copy of ${source.title}`.slice(0, 120),
         })
-        .returning({ id: boards.id, title: boards.title, isPublic: boards.isPublic });
+        .returning({
+          boardId: boards.id,
+          title: boards.title,
+          isPublic: boards.isPublic,
+          isPrivate: boards.isPrivate,
+          encryptedTitle: boards.encryptedTitle,
+          keyCheck: boards.keyCheck,
+        });
       if (!created) throw new Error("board insert failed");
       await tx
         .insert(boardMembers)
-        .values({ boardId: created.id, userId: user.id, role: "owner", addedBy: user.id });
+        .values({ boardId: created.boardId, userId: user.id, role: "owner", addedBy: user.id });
       // The copy starts from one snapshot of the source's current state (seq 0: no log yet).
-      await tx.insert(boardSnapshots).values({ boardId: created.id, seqUpto: 0, state });
+      await tx.insert(boardSnapshots).values({ boardId: created.boardId, seqUpto: 0, state });
       await audit(tx, {
         action: "board.create",
         actorId: user.id,
         orgId,
-        boardId: created.id,
+        boardId: created.boardId,
         targetType: "board",
-        targetId: created.id,
+        targetId: created.boardId,
         metadata: { duplicatedFrom: id },
         ip: request.ip,
       });
       return created;
     });
-    const detail: BoardDetail = { ...copy, role: "owner" };
-    return reply.status(201).send(detail);
+    return reply.status(201).send(boardDetail(copy, "owner"));
   });
 
   app.put("/boards/:id/thumbnail", async (request, reply) => {
     const user = requireUser(request);
     const { id } = parse(idParams, request.params);
-    await authorize(deps, id, user.id, "write", { shareToken: shareTokenOf(request) });
+    const access = await authorize(deps, id, user.id, "write", {
+      shareToken: shareTokenOf(request),
+    });
+    // A thumbnail is a picture of the content: storing one would defeat the encryption.
+    refuseIfPrivate(access, "Private boards have no thumbnail: it would show their content.");
     if (!deps.thumbnails)
       throw new AppError(503, "UNAVAILABLE", "Thumbnails are not configured on this server.");
     const body = request.body;

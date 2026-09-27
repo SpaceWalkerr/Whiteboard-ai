@@ -38,6 +38,14 @@ export class LimitedWritesRepository implements BoardRepository {
     return this.limited(() => this.inner.compact(boardId, build));
   }
 
+  installSnapshot(boardId: string, seqUpto: number, state: Uint8Array) {
+    return this.limited(() => this.inner.installSnapshot(boardId, seqUpto, state));
+  }
+
+  updatesSince(boardId: string, afterSeq: number) {
+    return this.inner.updatesSince(boardId, afterSeq);
+  }
+
   private async limited<T>(write: () => Promise<T>): Promise<T> {
     if (this.running >= this.maxConcurrentWrites) {
       await new Promise<void>((resolve) => this.waiting.push(resolve));

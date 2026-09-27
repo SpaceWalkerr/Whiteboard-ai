@@ -1,3 +1,4 @@
+import { KEYRING_DB } from "@/features/board/e2e/keyring";
 import { LOCAL_CACHE_PREFIX } from "@/features/board/sync/localCache";
 
 import { boardDetailSchema, type BoardDetail } from "@whiteboard/shared/api";
@@ -97,8 +98,8 @@ export function takeReturnTo(): string {
 
 /**
  * Removes everything this app keeps on the device for the signed-in user: offline board
- * copies (IndexedDB), cached board details and share tokens (board and interview summary
- * links). Called on sign-out.
+ * copies (IndexedDB), cached board details, share tokens (board and interview summary
+ * links) and the keys of private boards. Called on sign-out.
  */
 export async function clearLocalBoardData(): Promise<void> {
   try {
@@ -117,7 +118,10 @@ export async function clearLocalBoardData(): Promise<void> {
   await Promise.all(
     databases
       .map((db) => db.name)
-      .filter((name): name is string => name?.startsWith(LOCAL_CACHE_PREFIX) === true)
+      .filter(
+        (name): name is string =>
+          name?.startsWith(LOCAL_CACHE_PREFIX) === true || name === KEYRING_DB,
+      )
       .map(
         (name) =>
           new Promise<void>((resolve) => {

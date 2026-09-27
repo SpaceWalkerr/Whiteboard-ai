@@ -28,6 +28,8 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/auth/authContext";
 import { ApiRequestError } from "@/lib/apiClient";
+import { KeyWarning } from "../e2e/PrivateBadge";
+import { withKey } from "../e2e/roomKey";
 
 interface ShareDialogProps {
   open: boolean;
@@ -35,6 +37,11 @@ interface ShareDialogProps {
   boardId: string;
   /** Owners manage members, invites, links and public access; others see who's here. */
   canManage: boolean;
+  /**
+   * A private board's key (link form): links copied from here carry it in the fragment.
+   * Null for normal boards.
+   */
+  encodedKey: string | null;
 }
 
 const ROLE_LABELS: Record<ShareRole, string> = { editor: "Can edit", viewer: "Can view" };
@@ -72,7 +79,7 @@ function RoleSelect({
   );
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <Button
@@ -94,7 +101,13 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-export function ShareDialog({ open, onOpenChange, boardId, canManage }: ShareDialogProps) {
+export function ShareDialog({
+  open,
+  onOpenChange,
+  boardId,
+  canManage,
+  encodedKey,
+}: ShareDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -106,13 +119,23 @@ export function ShareDialog({ open, onOpenChange, boardId, canManage }: ShareDia
               : "People with access to this board."}
           </DialogDescription>
         </DialogHeader>
-        {open && <ShareDialogBody boardId={boardId} canManage={canManage} />}
+        {open && (
+          <ShareDialogBody boardId={boardId} canManage={canManage} encodedKey={encodedKey} />
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
-function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: boolean }) {
+function ShareDialogBody({
+  boardId,
+  canManage,
+  encodedKey,
+}: {
+  boardId: string;
+  canManage: boolean;
+  encodedKey: string | null;
+}) {
   const { api, session } = useAuth();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -126,7 +149,8 @@ function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: b
   const onError = (e: unknown) => {
     setError(errorText(e));
   };
-  const boardUrl = `${window.location.origin}/board/${boardId}`;
+  const plainUrl = `${window.location.origin}/board/${boardId}`;
+  const boardUrl = encodedKey ? withKey(plainUrl, encodedKey) : plainUrl;
 
   const updateRole = useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: ShareRole }) =>
@@ -192,6 +216,7 @@ function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: b
           {error}
         </p>
       )}
+      {encodedKey && <KeyWarning />}
       {canManage && (
         <InviteForm
           boardId={boardId}
@@ -200,6 +225,7 @@ function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: b
             void refresh();
           }}
           onError={onError}
+          privateBoard={encodedKey !== null}
         />
       )}
 
@@ -248,6 +274,7 @@ function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: b
         <LinksSection
           boardId={boardId}
           links={state.links}
+          encodedKey={encodedKey}
           onChanged={refresh}
           onRevoke={(id) => {
             revokeLink.mutate(id);
@@ -266,17 +293,25 @@ function ShareDialogBody({ boardId, canManage }: { boardId: string; canManage: b
               type="checkbox"
               className="size-4 accent-primary"
               checked={state.isPublic}
+              disabled={encodedKey !== null}
+              aria-describedby={encodedKey ? "public-private-note" : undefined}
               onChange={(e) => {
                 setPublic.mutate(e.target.checked);
               }}
             />
             Anyone with the board's link can view it, without signing in
           </label>
+          {encodedKey && (
+            <p id="public-private-note" className="text-xs text-muted-foreground">
+              Not available for private boards: only signed-in people you share with (who also have
+              the key) can open them.
+            </p>
+          )}
         </section>
       )}
 
       <div className="flex justify-end">
-        <CopyButton text={boardUrl} label="Copy board link" />
+        <CopyButton text={boardUrl} label={encodedKey ? "Copy link with key" : "Copy board link"} />
       </div>
     </div>
   );
@@ -337,10 +372,12 @@ function InviteForm({
   boardId,
   onInvited,
   onError,
+  privateBoard,
 }: {
   boardId: string;
   onInvited: () => void;
   onError: (e: unknown) => void;
+  privateBoard: boolean;
 }) {
   const { api } = useAuth();
   const emailId = useId();
@@ -392,6 +429,12 @@ function InviteForm({
           {invite.isPending ? "Inviting…" : "Invite"}
         </Button>
       </div>
+      {privateBoard && (
+        <p className="text-xs text-muted-foreground">
+          Invite emails never contain the key. After inviting, send them the link with the key
+          yourself.
+        </p>
+      )}
     </form>
   );
 }
@@ -399,11 +442,13 @@ function InviteForm({
 function LinksSection({
   boardId,
   links,
+  encodedKey,
   onChanged,
   onRevoke,
   onError,
 }: {
   boardId: string;
+  encodedKey: string | null;
   links: { id: string; role: ShareRole; createdAt: string; expiresAt: string | null }[];
   onChanged: () => Promise<void>;
   onRevoke: (id: string) => void;
@@ -420,7 +465,8 @@ function LinksSection({
         schema: createdShareLinkSchema,
       }),
     onSuccess: async (link) => {
-      setCreated(`${window.location.origin}/s/${link.token}`);
+      const url = `${window.location.origin}/s/${link.token}`;
+      setCreated(encodedKey ? withKey(url, encodedKey) : url);
       await onChanged();
     },
     onError,

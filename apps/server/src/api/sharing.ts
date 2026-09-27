@@ -25,7 +25,7 @@ import { audit } from "../audit/audit";
 import { requireUser } from "../auth/requestAuth";
 import { inviteEmail } from "../email/InviteEmail";
 import { AppError, BadRequestError, ConflictError, ForbiddenError, NotFoundError } from "../errors";
-import { authorize } from "./boards";
+import { authorize, refuseIfPrivate } from "./boards";
 import type { ApiDeps } from "./deps";
 import { addMember } from "./me";
 import { newSecretToken } from "./tokens";
@@ -111,6 +111,11 @@ export function registerSharingRoutes(app: FastifyInstance, deps: ApiDeps): void
     const { id } = parse(idParams, request.params);
     const { isPublic } = parse(sharingSettingsSchema, request.body);
     const access = await authorize(deps, id, user.id, "share");
+    if (isPublic)
+      refuseIfPrivate(
+        access,
+        "Private boards can't be public: anyone opening them would also need the key.",
+      );
     if (access.isPublic === isPublic) return { isPublic };
     await deps.db.transaction(async (tx) => {
       await tx.update(boards).set({ isPublic }).where(eq(boards.id, id));

@@ -23,6 +23,7 @@ export function ReviewDialog({
   onOpenChange,
   initial,
   saving,
+  privateBoard,
   onStart,
   onUpgrade,
 }: {
@@ -31,7 +32,12 @@ export function ReviewDialog({
   initial: ReviewRequest;
   /** Edits not yet stored on the server (the review reads the stored board). */
   saving: boolean;
-  onStart: (request: ReviewRequest) => void;
+  /**
+   * An end-to-end encrypted board: the browser sends the extracted graph, only with the
+   * user's consent for this review, and the review is kept only if they opt in.
+   */
+  privateBoard: boolean;
+  onStart: (request: ReviewRequest, privacy: { store: boolean } | null) => void;
   onUpgrade: (message: string) => void;
 }) {
   return (
@@ -39,7 +45,14 @@ export function ReviewDialog({
       <DialogContent className="sm:max-w-lg">
         {/* Mounted only while open, so the fields start from `initial` each time. */}
         {open && (
-          <ReviewForm initial={initial} saving={saving} onStart={onStart} onUpgrade={onUpgrade} />
+          <ReviewForm
+            initial={initial}
+            // Private boards send the graph from this browser: nothing to wait for.
+            saving={saving && !privateBoard}
+            privateBoard={privateBoard}
+            onStart={onStart}
+            onUpgrade={onUpgrade}
+          />
         )}
       </DialogContent>
     </Dialog>
@@ -49,14 +62,21 @@ export function ReviewDialog({
 function ReviewForm({
   initial,
   saving,
+  privateBoard,
   onStart,
   onUpgrade,
 }: {
   initial: ReviewRequest;
   saving: boolean;
-  onStart: (request: ReviewRequest) => void;
+  privateBoard: boolean;
+  onStart: (request: ReviewRequest, privacy: { store: boolean } | null) => void;
   onUpgrade: (message: string) => void;
 }) {
+  // Per review: never remembered, never pre-ticked.
+  const [consent, setConsent] = useState(false);
+  const [store, setStore] = useState(false);
+  const consentId = useId();
+  const storeId = useId();
   const [problemStatement, setProblemStatement] = useState(initial.problemStatement);
   const [requirements, setRequirements] = useState(initial.requirements);
   const problemId = useId();
@@ -79,7 +99,11 @@ function ReviewForm({
           );
           return;
         }
-        onStart({ problemStatement: problemStatement.trim(), requirements: requirements.trim() });
+        if (privateBoard && !consent) return;
+        onStart(
+          { problemStatement: problemStatement.trim(), requirements: requirements.trim() },
+          privateBoard ? { store } : null,
+        );
       }}
     >
       <DialogHeader>
@@ -133,16 +157,56 @@ function ReviewForm({
                 ? `${String(left)} of ${String(q.reviewsLimit)} reviews left this month (${PLAN_NAMES[q.plan]} plan).`
                 : null}
       </p>
-      <p className="text-xs text-muted-foreground">
-        The board&apos;s components, connections and labels, plus the text above, are sent to
-        Anthropic&apos;s Claude API to produce the review. Nothing else on the board is sent.
-      </p>
+      {privateBoard ? (
+        <fieldset className="flex flex-col gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <legend className="px-1 font-medium">This board is end-to-end encrypted</legend>
+          <p>
+            To review it, your browser will send its <strong>graph</strong> — component types,
+            labels and connections — plus the text above, to our server and on to Anthropic&apos;s
+            Claude API. Positions, styles, freehand drawings and text boxes aren&apos;t sent. This
+            applies to this review only.
+          </p>
+          <label htmlFor={consentId} className="flex items-start gap-2">
+            <input
+              id={consentId}
+              type="checkbox"
+              required
+              className="mt-0.5 size-4 accent-primary"
+              checked={consent}
+              onChange={(e) => {
+                setConsent(e.target.checked);
+              }}
+            />
+            I agree to send this board&apos;s graph for this review
+          </label>
+          <label htmlFor={storeId} className="flex items-start gap-2">
+            <input
+              id={storeId}
+              type="checkbox"
+              className="mt-0.5 size-4 accent-primary"
+              checked={store}
+              onChange={(e) => {
+                setStore(e.target.checked);
+              }}
+            />
+            <span>
+              Keep this review on the server (so it appears in the history). It is then readable by
+              our server. Off: nothing is kept, and the review is gone when you leave.
+            </span>
+          </label>
+        </fieldset>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          The board&apos;s components, connections and labels, plus the text above, are sent to
+          Anthropic&apos;s Claude API to produce the review. Nothing else on the board is sent.
+        </p>
+      )}
 
       <div className="flex justify-end gap-2">
         <Button
           type="submit"
           aria-describedby={quotaId}
-          disabled={saving || unavailable || quota.isPending}
+          disabled={saving || unavailable || quota.isPending || (privateBoard && !consent)}
         >
           {saving ? "Saving your changes…" : exhausted ? "See plans" : "Start review"}
         </Button>

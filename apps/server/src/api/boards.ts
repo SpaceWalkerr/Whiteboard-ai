@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   boardListQuerySchema,
   createBoardSchema,
+  PRIVATE_BOARD_TITLE,
   ticketRequestSchema,
   updateBoardSchema,
   type BoardDetail,
@@ -11,9 +12,18 @@ import {
 } from "@whiteboard/shared/api";
 import { and, boardMembers, boards, boardVisits, eq, folders, sql } from "@whiteboard/shared/db";
 import { can, resolveBoardAccess, type BoardAccess, type BoardAction } from "../access/boardAccess";
+import { getEntitlement } from "../ai/entitlements";
 import { audit } from "../audit/audit";
 import { requireUser } from "../auth/requestAuth";
-import { ForbiddenError, NotFoundError, UnauthorizedError } from "../errors";
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  PaymentRequiredError,
+  PrivateBoardError,
+  UnauthorizedError,
+} from "../errors";
 import type { ApiDeps } from "./deps";
 import { parse } from "./validation";
 import { THUMBNAIL_URL_TTL_SECONDS } from "../storage/thumbnails";
@@ -48,6 +58,34 @@ export async function authorize(
   return { ...access, role: access.role };
 }
 
+const base64 = (bytes: Uint8Array | null): string | null =>
+  bytes ? Buffer.from(bytes).toString("base64") : null;
+const fromBase64 = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, "base64"));
+
+/** The board as the web app sees it (encrypted fields only for private boards). */
+export function boardDetail(
+  access: Pick<
+    BoardAccess,
+    "boardId" | "title" | "isPublic" | "isPrivate" | "encryptedTitle" | "keyCheck"
+  >,
+  role: BoardAccess["role"] & string,
+): BoardDetail {
+  return {
+    id: access.boardId,
+    title: access.title,
+    role,
+    isPublic: access.isPublic,
+    isPrivate: access.isPrivate,
+    encryptedTitle: base64(access.encryptedTitle),
+    keyCheck: base64(access.keyCheck),
+  };
+}
+
+/** Refuses a feature that must read the board's content when the board is private. */
+export function refuseIfPrivate(access: Pick<BoardAccess, "isPrivate">, message: string): void {
+  if (access.isPrivate) throw new PrivateBoardError(message);
+}
+
 /** Share-link token presented by link users (header, so it never lands in URLs or logs). */
 export function shareTokenOf(request: FastifyRequest): string | undefined {
   const header = request.headers["x-share-token"];
@@ -58,8 +96,10 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
   app.get("/boards", async (request): Promise<{ boards: BoardSummary[] }> => {
     const user = requireUser(request);
     const query = parse(boardListQuerySchema, request.query);
+    // Private boards' titles are encrypted (the stored title is a placeholder), so they
+    // can't be searched here; the dashboard says so.
     const search = query.q
-      ? sql`and b.title ilike ${`%${query.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`}`
+      ? sql`and not b.is_private and b.title ilike ${`%${query.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`}`
       : sql``;
     const folder = query.folderId ? sql`and b.folder_id = ${query.folderId}` : sql``;
     const trash = query.view === "trash";
@@ -86,9 +126,11 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       deleted_at: string | null;
       last_opened_at: string | null;
       thumbnail_path: string | null;
+      is_private: boolean;
+      encrypted_title: Buffer | null;
     }>(sql`
       select b.id, b.title, m.role, b.folder_id, b.is_public, b.updated_at::text, b.deleted_at::text,
-             v.last_opened_at::text, b.thumbnail_path
+             v.last_opened_at::text, b.thumbnail_path, b.is_private, b.encrypted_title
       from ${boardMembers} m
       join ${boards} b on b.id = m.board_id
       left join ${boardVisits} v on v.board_id = b.id and v.user_id = m.user_id
@@ -115,6 +157,8 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         deletedAt: r.deleted_at,
         lastOpenedAt: r.last_opened_at,
         thumbnailUrl: r.thumbnail_path ? (urls.get(r.thumbnail_path) ?? null) : null,
+        isPrivate: r.is_private,
+        encryptedTitle: base64(r.encrypted_title),
       })),
     };
   });
@@ -122,6 +166,17 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
   app.post("/boards", async (request, reply) => {
     const user = requireUser(request);
     const body = parse(createBoardSchema, request.body ?? {});
+    const secret = body.private;
+    if (secret) {
+      if (body.title !== undefined)
+        throw new BadRequestError("A private board's title must be encrypted.");
+      const entitlement = await getEntitlement(deps.db, user.id);
+      if (!entitlement.privateRooms)
+        throw new PaymentRequiredError(
+          "PLAN_REQUIRED",
+          "Private end-to-end encrypted boards are included in the Pro and Team plans.",
+        );
+    }
     const board = await deps.db.transaction(async (tx) => {
       const orgId = await ensureWorkspace(tx, user);
       if (body.folderId) {
@@ -134,30 +189,45 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       const [created] = await tx
         .insert(boards)
         .values({
-          id: crypto.randomUUID(),
+          id: secret?.id ?? crypto.randomUUID(),
           ownerId: user.id,
           orgId,
-          title: body.title ?? "Untitled board",
+          title: secret ? PRIVATE_BOARD_TITLE : (body.title ?? "Untitled board"),
           folderId: body.folderId ?? null,
+          isPrivate: secret !== undefined,
+          keyCheck: secret ? fromBase64(secret.keyCheck) : null,
+          encryptedTitle: secret ? fromBase64(secret.encryptedTitle) : null,
         })
-        .returning({ id: boards.id, title: boards.title, isPublic: boards.isPublic });
-      if (!created) throw new Error("board insert failed");
+        // The browser picked the id of a private board; an existing id is refused, never reused.
+        .onConflictDoNothing({ target: boards.id })
+        .returning({
+          boardId: boards.id,
+          title: boards.title,
+          isPublic: boards.isPublic,
+          isPrivate: boards.isPrivate,
+          encryptedTitle: boards.encryptedTitle,
+          keyCheck: boards.keyCheck,
+        });
+      if (!created) {
+        if (secret) throw new ConflictError("That board id is already taken; try again.");
+        throw new Error("board insert failed");
+      }
       await tx
         .insert(boardMembers)
-        .values({ boardId: created.id, userId: user.id, role: "owner", addedBy: user.id });
+        .values({ boardId: created.boardId, userId: user.id, role: "owner", addedBy: user.id });
       await audit(tx, {
         action: "board.create",
         actorId: user.id,
         orgId,
-        boardId: created.id,
+        boardId: created.boardId,
         targetType: "board",
-        targetId: created.id,
+        targetId: created.boardId,
+        ...(created.isPrivate ? { metadata: { private: true } } : {}),
         ip: request.ip,
       });
       return created;
     });
-    const detail: BoardDetail = { ...board, role: "owner" };
-    return reply.status(201).send(detail);
+    return reply.status(201).send(boardDetail(board, "owner"));
   });
 
   app.get("/boards/:id", async (request): Promise<BoardDetail> => {
@@ -165,12 +235,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const access = await authorize(deps, id, request.user?.id ?? null, "read", {
       shareToken: shareTokenOf(request),
     });
-    return {
-      id: access.boardId,
-      title: access.title,
-      role: access.role,
-      isPublic: access.isPublic,
-    };
+    return boardDetail(access, access.role);
   });
 
   app.patch("/boards/:id", async (request): Promise<BoardDetail> => {
@@ -187,6 +252,12 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         shareToken: shareTokenOf(request),
       },
     );
+    if (access.isPrivate ? body.title !== undefined : body.encryptedTitle !== undefined)
+      throw new BadRequestError(
+        access.isPrivate
+          ? "A private board's title must be encrypted."
+          : "Only private boards have an encrypted title.",
+      );
     if (body.folderId && access.orgId) {
       const [folder] = await deps.db
         .select({ id: folders.id })
@@ -198,17 +269,19 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       .update(boards)
       .set({
         ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.encryptedTitle !== undefined
+          ? { encryptedTitle: fromBase64(body.encryptedTitle) }
+          : {}),
         ...(body.folderId !== undefined ? { folderId: body.folderId } : {}),
         updatedAt: sql`now()`,
       })
       .where(eq(boards.id, id))
-      .returning({ title: boards.title, isPublic: boards.isPublic });
-    return {
-      id,
-      title: updated?.title ?? access.title,
-      role: access.role,
-      isPublic: updated?.isPublic ?? access.isPublic,
-    };
+      .returning({
+        title: boards.title,
+        isPublic: boards.isPublic,
+        encryptedTitle: boards.encryptedTitle,
+      });
+    return boardDetail({ ...access, ...(updated ?? {}) }, access.role);
   });
 
   app.delete("/boards/:id", async (request, reply) => {
@@ -239,8 +312,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const user = requireUser(request);
     const { id } = parse(idParams, request.params);
     const access = await authorize(deps, id, user.id, "delete", { allowDeleted: true });
-    if (!access.deleted)
-      return { id, title: access.title, role: access.role, isPublic: access.isPublic };
+    if (!access.deleted) return boardDetail(access, access.role);
     await deps.db.transaction(async (tx) => {
       const restored = await tx
         .update(boards)
@@ -264,7 +336,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         ip: request.ip,
       });
     });
-    return { id, title: access.title, role: access.role, isPublic: access.isPublic };
+    return boardDetail(access, access.role);
   });
 
   /**

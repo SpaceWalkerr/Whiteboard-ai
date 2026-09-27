@@ -15,21 +15,16 @@ import {
   MESSAGE_SYNC,
   readAwarenessEntries,
 } from "@whiteboard/shared/sync";
-import { CLUSTER_KINDS, type ClusterMessage } from "../cluster/envelope";
+import { CLUSTER_KINDS, clusterKindName, type ClusterMessage } from "../cluster/envelope";
 import type { PersistenceLease } from "../cluster/lease";
 import type { RoomBus } from "../cluster/roomBus";
-import type { BoardRepository } from "../persistence/repository";
+import type { BoardRepository, LoadedBoard } from "../persistence/repository";
+import { EncryptedRoom } from "./encryptedRoom";
 import type { SyncMetrics } from "./metrics";
-import { RoomPersistence, type Attribution } from "./roomPersistence";
+import { RoomPersistence, YjsContent } from "./roomPersistence";
+import { mergeStateVectors, type ManagedRoom, type RoomLoad, type RoomMember } from "./roomTypes";
 
-/** What a room needs from a connection. */
-export interface RoomMember {
-  send(message: Uint8Array): void;
-  /** Who to record as the author of updates this member sends. */
-  attribution(): Attribution;
-  /** Closes the member's connection (e.g. the board was deleted while they were loading). */
-  close(code: number, reason: string): void;
-}
+export { mergeStateVectors, type RoomLoad, type RoomMember };
 
 /** Transaction origin for documents loaded from the database: not re-persisted, not broadcast. */
 export const LOAD_ORIGIN = Symbol("load");
@@ -39,19 +34,13 @@ export const LOAD_ORIGIN = Symbol("load");
  */
 export const REMOTE_ORIGIN = Symbol("remote");
 
-export type RoomLoad = { ok: true } | { ok: false; reason: "deleted" | "error" };
-
-const KIND_NAMES = Object.fromEntries(
-  Object.entries(CLUSTER_KINDS).map(([name, kind]) => [kind, name]),
-) as Record<number, string>;
-
 /**
  * One board's live state on this instance: its Y.Doc, the awareness (presence) of everyone
  * connected (here or on other instances), and this instance's connections. Changes are
  * broadcast to every other local member and published to the other instances; document
  * changes are also queued for durable storage when this instance is the room's writer.
  */
-export class Room {
+export class Room implements ManagedRoom {
   readonly doc = new Y.Doc();
   readonly awareness: Awareness;
   readonly members = new Set<RoomMember>();
@@ -180,7 +169,8 @@ export class Room {
         if (!this.persistence?.isActive) this.markPersisted(message.payload, false);
         return;
       case CLUSTER_KINDS.leaseReleased:
-        return; // Handled by the RoomManager.
+      case CLUSTER_KINDS.peerLeft:
+        return; // Handled by the RoomManager / private rooms only.
     }
   }
 
@@ -225,7 +215,7 @@ export class Room {
 
   private publish(kind: (typeof CLUSTER_KINDS)[keyof typeof CLUSTER_KINDS], payload: Uint8Array) {
     this.bus.publish(this.boardId, { kind, payload });
-    this.metrics.clusterMessages.inc({ kind: KIND_NAMES[kind] ?? "unknown", direction: "out" });
+    this.metrics.clusterMessages.inc({ kind: clusterKindName(kind), direction: "out" });
   }
 
   private isMember(origin: unknown): origin is RoomMember {
@@ -238,27 +228,43 @@ export class Room {
     }
   }
 
+  applyLoaded(loaded: LoadedBoard): void {
+    Y.transact(
+      this.doc,
+      () => {
+        if (loaded.snapshot) Y.applyUpdate(this.doc, loaded.snapshot.state, LOAD_ORIGIN);
+        for (const u of loaded.updates) Y.applyUpdate(this.doc, u.update, LOAD_ORIGIN);
+      },
+      LOAD_ORIGIN,
+    );
+    this.persistedVector = Y.encodeStateVector(this.doc);
+  }
+
+  createContent(repository: BoardRepository): YjsContent {
+    return new YjsContent(this.doc, repository, this.boardId);
+  }
+
+  addMember(member: RoomMember): void {
+    this.members.add(member);
+  }
+
+  removeMember(member: RoomMember): void {
+    const owned = [...this.awarenessOwners]
+      .filter(([, owner]) => owner === member)
+      .map(([id]) => id);
+    for (const id of owned) this.awarenessOwners.delete(id);
+    // Tell everyone else (here and on other instances) this member's cursors are gone. The
+    // member is still in the room here, so the removal counts as its own and is published.
+    if (owned.length > 0) removeAwarenessStates(this.awareness, owned, member);
+    this.members.delete(member);
+  }
+
   destroy(): void {
     if (this.evictTimer) clearTimeout(this.evictTimer);
     this.persistence?.dispose();
     this.awareness.destroy();
     this.doc.destroy();
   }
-}
-
-/** Per-client maximum of two state vectors. */
-export function mergeStateVectors(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const merged = Y.decodeStateVector(a);
-  for (const [client, clock] of Y.decodeStateVector(b)) {
-    if (clock > (merged.get(client) ?? 0)) merged.set(client, clock);
-  }
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, merged.size);
-  for (const [client, clock] of merged) {
-    encoding.writeVarUint(encoder, client);
-    encoding.writeVarUint(encoder, clock);
-  }
-  return encoding.toUint8Array(encoder);
 }
 
 export interface RoomManagerOptions {
@@ -286,7 +292,7 @@ export interface RoomManagerOptions {
  * several instances, kept in sync with the same room on the others through the RoomBus.
  */
 export class RoomManager {
-  private readonly rooms = new Map<string, Room>();
+  private readonly rooms = new Map<string, ManagedRoom>();
   private readonly leaseTimer: NodeJS.Timeout;
   private readonly resyncTimer: NodeJS.Timeout;
   private readonly stopReconnect: () => void;
@@ -310,15 +316,34 @@ export class RoomManager {
     return this.rooms.size;
   }
 
+  /** A normal board's room, if this instance holds it. */
   get(boardId: string): Room | undefined {
-    return this.rooms.get(boardId);
+    const room = this.rooms.get(boardId);
+    return room instanceof Room ? room : undefined;
   }
 
-  /** Gets or creates (and starts loading) the room, and cancels any pending eviction. */
-  acquire(boardId: string): Room {
+  /** A private board's room, if this instance holds it. */
+  getEncrypted(boardId: string): EncryptedRoom | undefined {
+    const room = this.rooms.get(boardId);
+    return room instanceof EncryptedRoom ? room : undefined;
+  }
+
+  /**
+   * Gets or creates (and starts loading) the room, and cancels any pending eviction. Whether
+   * a board is private comes from the database at connection time and never changes, so
+   * both kinds never exist for one board.
+   */
+  acquire(boardId: string, encrypted: boolean): ManagedRoom {
     let room = this.rooms.get(boardId);
     if (!room) {
-      const created = new Room(boardId, this.options.bus, this.options.metrics);
+      const created: ManagedRoom = encrypted
+        ? new EncryptedRoom(boardId, {
+            bus: this.options.bus,
+            metrics: this.options.metrics,
+            logger: this.options.logger,
+            repository: this.options.repository,
+          })
+        : new Room(boardId, this.options.bus, this.options.metrics);
       // Register before loading: a load that fails must be able to remove the room again.
       this.rooms.set(boardId, created);
       created.ready = this.load(created);
@@ -332,19 +357,12 @@ export class RoomManager {
     return room;
   }
 
-  join(room: Room, member: RoomMember): void {
-    room.members.add(member);
+  join(room: ManagedRoom, member: RoomMember): void {
+    room.addMember(member);
   }
 
-  leave(room: Room, member: RoomMember): void {
-    const owned = [...room.awarenessOwners]
-      .filter(([, owner]) => owner === member)
-      .map(([id]) => id);
-    for (const id of owned) room.awarenessOwners.delete(id);
-    // Tell everyone else (here and on other instances) this member's cursors are gone. The
-    // member is still in the room here, so the removal counts as its own and is published.
-    if (owned.length > 0) removeAwarenessStates(room.awareness, owned, member);
-    room.members.delete(member);
+  leave(room: ManagedRoom, member: RoomMember): void {
+    room.removeMember(member);
     if (room.members.size === 0) this.scheduleEviction(room);
   }
 
@@ -379,7 +397,7 @@ export class RoomManager {
     this.options.metrics.roomsWriter.set(0);
   }
 
-  private async load(room: Room): Promise<RoomLoad> {
+  private async load(room: ManagedRoom): Promise<RoomLoad> {
     const started = performance.now();
     // Subscribe BEFORE reading the database, so no update published after the read can be
     // missed (earlier ones are in the database or arrive via the sync request below).
@@ -390,19 +408,11 @@ export class RoomManager {
         this.drop(room);
         return { ok: false, reason: "deleted" };
       }
-      Y.transact(
-        room.doc,
-        () => {
-          if (loaded.snapshot) Y.applyUpdate(room.doc, loaded.snapshot.state, LOAD_ORIGIN);
-          for (const u of loaded.updates) Y.applyUpdate(room.doc, u.update, LOAD_ORIGIN);
-        },
-        LOAD_ORIGIN,
-      );
-      room.persistedVector = Y.encodeStateVector(room.doc);
+      room.applyLoaded(loaded);
       const writer = await this.tryAcquireLease(room);
       room.persistence = new RoomPersistence({
         boardId: room.boardId,
-        doc: room.doc,
+        content: room.createContent(this.options.repository),
         repository: this.options.repository,
         logger: this.options.logger,
         metrics: this.options.metrics,
@@ -425,12 +435,12 @@ export class RoomManager {
     }
   }
 
-  private async subscribe(room: Room): Promise<void> {
+  private async subscribe(room: ManagedRoom): Promise<void> {
     const { bus, logger, subscribeTimeoutMs = 2_000 } = this.options;
     let timer: NodeJS.Timeout | undefined;
     const joined = bus.join(room.boardId, (message) => {
       this.options.metrics.clusterMessages.inc({
-        kind: KIND_NAMES[message.kind] ?? "unknown",
+        kind: clusterKindName(message.kind),
         direction: "in",
       });
       if (message.kind === CLUSTER_KINDS.leaseReleased) void this.maintainLease(room);
@@ -462,7 +472,7 @@ export class RoomManager {
    * Keeps lease ownership current: the writer renews (and stops writing if it lost the
    * lease), others claim a free lease (e.g. the writer died or left the room).
    */
-  private async maintainLease(room: Room): Promise<void> {
+  private async maintainLease(room: ManagedRoom): Promise<void> {
     const persistence = room.persistence;
     if (!persistence || room.closing || room.leaseBusy) return;
     room.leaseBusy = true;
@@ -490,7 +500,7 @@ export class RoomManager {
    * True when this instance should write the room. If Redis can't be reached we write
    * anyway (fail open): writes are idempotent, and otherwise nobody might persist.
    */
-  private async tryAcquireLease(room: Room): Promise<boolean> {
+  private async tryAcquireLease(room: ManagedRoom): Promise<boolean> {
     try {
       const acquired = await this.options.lease.acquire(room.boardId);
       if (acquired && !room.holdsLease)
@@ -508,7 +518,7 @@ export class RoomManager {
     }
   }
 
-  private async renewLease(room: Room): Promise<boolean> {
+  private async renewLease(room: ManagedRoom): Promise<boolean> {
     try {
       // Written without the lease (Redis was down): take it properly now if it's free.
       const held = room.holdsLease
@@ -521,7 +531,7 @@ export class RoomManager {
     }
   }
 
-  private async releaseLease(room: Room): Promise<void> {
+  private async releaseLease(room: ManagedRoom): Promise<void> {
     if (!room.holdsLease) return;
     room.holdsLease = false;
     try {
@@ -547,7 +557,7 @@ export class RoomManager {
     if (this.rooms.size > 0) this.options.metrics.resyncs.inc({ reason });
   }
 
-  private scheduleEviction(room: Room): void {
+  private scheduleEviction(room: ManagedRoom): void {
     if (room.evictTimer) return;
     room.evictTimer = setTimeout(() => {
       room.evictTimer = null;
@@ -556,7 +566,7 @@ export class RoomManager {
     room.evictTimer.unref();
   }
 
-  private async evict(room: Room): Promise<void> {
+  private async evict(room: ManagedRoom): Promise<void> {
     if (room.members.size > 0 || this.rooms.get(room.boardId) !== room) return;
     // A room still loading may have edits waiting to be applied; let them land first.
     await room.ready;
@@ -582,7 +592,7 @@ export class RoomManager {
     await this.releaseLease(room);
   }
 
-  private drop(room: Room): void {
+  private drop(room: ManagedRoom): void {
     if (this.rooms.get(room.boardId) === room) {
       this.rooms.delete(room.boardId);
       this.options.bus.leave(room.boardId);

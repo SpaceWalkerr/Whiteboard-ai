@@ -14,6 +14,7 @@ import {
   type ReviewRequest,
 } from "@whiteboard/graph";
 import type { DeniedReason, PresenceUser, TicketResult } from "@whiteboard/shared/sync";
+import { extractGraph } from "@whiteboard/graph";
 import { useAuth } from "@/auth/authContext";
 import type { ApiClient } from "@/lib/apiClient";
 import { shareTokenFor } from "@/auth/localData";
@@ -33,6 +34,10 @@ import { useBoardKeyboard } from "./keyboard/useBoardKeyboard";
 import { useClipboard } from "./keyboard/useClipboard";
 import { shapeText } from "./model/defaults";
 import { PeersStore, StatusStore } from "./sync/stores";
+import { PrivateBadge } from "./e2e/PrivateBadge";
+import { PRIVATE_LIMITS, type UnlockedBoard } from "./e2e/privateBoards";
+import { boardLinkWithKey } from "./e2e/roomKey";
+import { SaveKeyDialog } from "./e2e/SaveKeyDialog";
 import { useThumbnail } from "./sync/useThumbnail";
 import {
   useFollow,
@@ -165,7 +170,8 @@ class RoleStore {
 }
 
 export type TicketFetchResult =
-  { ok: true; ticket: string; role: BoardRole } | { ok: false; reason: DeniedReason | "error" };
+  | { ok: true; ticket: string; role: BoardRole }
+  | { ok: false; reason: Exclude<DeniedReason, "bad_key"> | "error" };
 
 interface BoardPageProps {
   boardId: string;
@@ -177,6 +183,10 @@ interface BoardPageProps {
   /** Asks the API for a room ticket (re-checks access); called before every (re)connect. */
   fetchTicket: () => Promise<TicketFetchResult>;
   onTitleChange: (title: string) => Promise<void>;
+  /** A private board, unlocked with its key (null for normal boards). */
+  unlocked: UnlockedBoard | null;
+  /** A private board just created: ask the owner to save its link first. */
+  justCreated: boolean;
 }
 
 /**
@@ -199,6 +209,8 @@ export function BoardPage({
   me,
   fetchTicket,
   onTitleChange,
+  unlocked,
+  justCreated,
 }: BoardPageProps) {
   const { api } = useAuth();
   const [session] = useState(() => {
@@ -225,7 +237,8 @@ export function BoardPage({
     store: session.controller.store,
     boardId,
     api,
-    enabled: detail.role !== "viewer",
+    // A thumbnail would show a private board's content to the server.
+    enabled: detail.role !== "viewer" && unlocked === null,
     shareToken: shareTokenFor(boardId),
   });
   useSyncConnection({
@@ -236,6 +249,7 @@ export function BoardPage({
     status: session.status,
     getTicket,
     onInterviewState: session.interview.receive,
+    roomKey: unlocked?.roomKey ?? null,
   });
   useEffect(
     () =>
@@ -258,8 +272,10 @@ export function BoardPage({
       session={session}
       boardId={boardId}
       me={me}
-      title={detail.title}
+      title={unlocked?.title ?? detail.title}
       onTitleChange={onTitleChange}
+      encodedKey={unlocked?.roomKey.encoded ?? null}
+      justCreated={justCreated}
     />
   );
 }
@@ -270,13 +286,20 @@ function BoardView({
   me,
   title,
   onTitleChange,
+  encodedKey,
+  justCreated,
 }: {
   session: BoardSession;
   boardId: string;
   me: PresenceUser;
   title: string;
   onTitleChange: (title: string) => Promise<void>;
+  /** Private boards: the key in link form (null otherwise). */
+  encodedKey: string | null;
+  justCreated: boolean;
 }) {
+  const privateBoard = encodedKey !== null;
+  const [saveKeyOpen, setSaveKeyOpen] = useState(justCreated && privateBoard);
   const { controller, viewport, interactions, awareness } = session;
   const status = useSyncExternalStore(session.status.subscribe, session.status.get);
   const role = useSyncExternalStore(session.role.subscribe, session.role.get);
@@ -317,7 +340,8 @@ function BoardView({
   const [interviewPanelOpen, setInterviewPanelOpen] = useState(false);
   const [startInterviewOpen, setStartInterviewOpen] = useState(false);
   const [reviewPrefill, setReviewPrefill] = useState<ReviewRequest | null>(null);
-  const hintsAvailable = signedIn && !readOnly && !aiLocked && quota.data?.liveHints === true;
+  const hintsAvailable =
+    signedIn && !readOnly && !aiLocked && !privateBoard && quota.data?.liveHints === true;
   const checkButtonRef = useRef<HTMLButtonElement>(null);
   const reviewButtonRef = useRef<HTMLButtonElement>(null);
   const runCheck = useCallback(() => {
@@ -368,13 +392,26 @@ function BoardView({
     reviewButtonRef.current?.focus();
   }, [session]);
   const startReview = useCallback(
-    (request: ReviewRequest) => {
+    (request: ReviewRequest, privacy: { store: boolean } | null) => {
       setReviewDialogOpen(false);
       setReviewPrefill(null);
       session.check.close();
-      void session.review.start(request);
+      // A private board's graph is extracted here, now, and sent only because the user
+      // consented to it for this review (the dialog doesn't offer "Start" otherwise).
+      void session.review.start(
+        privacy
+          ? {
+              ...request,
+              private: {
+                graph: extractGraph(controller.store.getSnapshot().ordered),
+                consent: true,
+                store: privacy.store,
+              },
+            }
+          : request,
+      );
     },
-    [session],
+    [session, controller],
   );
 
   // Refresh "N reviews left" after each completed review.
@@ -579,13 +616,16 @@ function BoardView({
             <ArrowLeft className="size-4" />
           </Link>
           <BoardTitle title={title} editable={!readOnly} onChange={onTitleChange} />
+          {privateBoard && <PrivateBadge />}
           {readOnly && (
             <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
               View only
             </span>
           )}
           {/* Here rather than in the right-hand bar, which must stay clear of the toolbar. */}
-          {signedIn && !readOnly && !interviewActive && (
+          {/* Interviews need the server to read the board (replay, summary): the badge's
+              explanation lists them among what's off for private boards. */}
+          {signedIn && !readOnly && !interviewActive && !privateBoard && (
             <Button
               size="sm"
               variant="outline"
@@ -687,7 +727,17 @@ function BoardView({
           onOpenChange={setShareOpen}
           boardId={boardId}
           canManage={role === "owner"}
+          encodedKey={encodedKey}
         />
+        {encodedKey && (
+          <SaveKeyDialog
+            open={saveKeyOpen}
+            link={boardLinkWithKey(window.location.origin, boardId, encodedKey)}
+            onDone={() => {
+              setSaveKeyOpen(false);
+            }}
+          />
+        )}
 
         {followed && (
           <div
@@ -740,6 +790,7 @@ function BoardView({
                 ? null
                 : {
                     available: hintsAvailable,
+                    unavailableReason: privateBoard ? PRIVATE_LIMITS.hints : null,
                     enabled: hintsAvailable && hintsWanted,
                     notice: hintsNotice,
                     onToggle: (enabled) => {
@@ -765,6 +816,7 @@ function BoardView({
             }
           }
           saving={status.save === "saving"}
+          privateBoard={privateBoard}
           onStart={startReview}
           onUpgrade={(message) => {
             setReviewDialogOpen(false);

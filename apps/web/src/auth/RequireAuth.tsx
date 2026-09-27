@@ -28,7 +28,8 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation();
   if (status === "loading") return <LoadingPage />;
   if (status === "signedOut") {
-    rememberReturnTo(`${location.pathname}${location.search}`);
+    // The fragment may hold a private board's key; it stays on this device (sessionStorage).
+    rememberReturnTo(`${location.pathname}${location.search}${location.hash}`);
     return <Navigate to="/sign-in" replace />;
   }
   return children;

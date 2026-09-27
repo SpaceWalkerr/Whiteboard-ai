@@ -18,7 +18,8 @@ import type { ConnectionIdentity } from "./auth";
 import type { SyncMetrics } from "./metrics";
 import type { TokenBucket } from "./rateLimit";
 import type { Attribution } from "./roomPersistence";
-import type { Room, RoomMember } from "./rooms";
+import type { Room } from "./rooms";
+import type { ManagedRoom, RoomMember } from "./roomTypes";
 
 export interface ConnectionOptions {
   rateLimiter: TokenBucket;
@@ -27,11 +28,15 @@ export interface ConnectionOptions {
   logger: Logger;
   /** Close a client whose unsent data exceeds this; it reconnects and resyncs. */
   maxBufferedBytes: number;
-  onClose: (connection: SyncConnection) => void;
+  onClose: (connection: RoomConnection) => void;
 }
 
-/** Server side of one client socket in one room. */
-export class SyncConnection implements RoomMember {
+/**
+ * Server side of one client socket in one room: rate limits, buffering while the room
+ * loads, heartbeat, backpressure and closing. Subclasses speak the room's protocol (plain
+ * Yjs for normal boards, envelopes for private ones).
+ */
+export abstract class RoomConnection<R extends ManagedRoom = ManagedRoom> implements RoomMember {
   /** Set by pong; cleared by each heartbeat. A connection that misses a beat is terminated. */
   private alive = true;
   private closing = false;
@@ -42,9 +47,9 @@ export class SyncConnection implements RoomMember {
 
   constructor(
     private readonly ws: WebSocket,
-    readonly room: Room,
+    readonly room: R,
     readonly identity: ConnectionIdentity,
-    private readonly options: ConnectionOptions,
+    protected readonly options: ConnectionOptions,
   ) {}
 
   start(): void {
@@ -81,34 +86,18 @@ export class SyncConnection implements RoomMember {
     });
   }
 
-  /** Who authored updates from this connection: its presence (guest id until Phase 4). */
-  attribution(): Attribution {
-    for (const [clientId, owner] of this.room.awarenessOwners) {
-      if (owner !== this) continue;
-      const state = this.room.awareness.getStates().get(clientId) as
-        { user?: { id?: unknown } } | undefined;
-      const userId = typeof state?.user?.id === "string" ? state.user.id : null;
-      return { clientId, userId: this.identity.userId ?? userId };
-    }
-    return { clientId: null, userId: this.identity.userId };
-  }
+  /** Who authored updates from this connection. */
+  abstract attribution(): Attribution;
+
+  /** The room is loaded: start the protocol's handshake. */
+  protected abstract beginSync(): void;
+
+  /** One decoded message of the given type; throw to close the socket as invalid (1007). */
+  protected abstract handleType(type: number, decoder: decoding.Decoder, bytes: number): void;
 
   /** Stop accepting new messages from this connection (graceful shutdown). */
   freeze(): void {
     this.frozen = true;
-  }
-
-  private beginSync(): void {
-    // Start the handshake: send our state vector so the client sends what we're missing.
-    this.send(
-      encodeMessage(MESSAGE_SYNC, (encoder) => {
-        syncProtocol.writeSyncStep1(encoder, this.room.doc);
-      }),
-    );
-    const others = [...this.room.awareness.getStates().keys()];
-    if (others.length > 0)
-      this.send(encodeAwarenessMessage(encodeAwarenessUpdate(this.room.awareness, others)));
-    this.send(this.room.persistedMessage());
   }
 
   send(message: Uint8Array): void {
@@ -156,11 +145,7 @@ export class SyncConnection implements RoomMember {
     const message = toUint8Array(data);
     try {
       const decoder = decoding.createDecoder(message);
-      const type = decoding.readVarUint(decoder);
-      if (type === MESSAGE_SYNC) this.handleSync(decoder, message.byteLength);
-      else if (type === MESSAGE_AWARENESS)
-        this.handleAwareness(decoding.readVarUint8Array(decoder));
-      else throw new Error(`unknown message type ${type}`);
+      this.handleType(decoding.readVarUint(decoder), decoder, message.byteLength);
     } catch (error) {
       this.options.logger.info(
         { err: error, boardId: this.room.boardId },
@@ -168,6 +153,40 @@ export class SyncConnection implements RoomMember {
       );
       this.close(CLOSE_CODES.invalidPayload, "invalid message");
     }
+  }
+}
+
+/** A normal board's connection: y-protocols sync and presence over the room's Y.Doc. */
+export class SyncConnection extends RoomConnection<Room> {
+  /** Who authored updates from this connection: its presence (guest id until Phase 4). */
+  override attribution(): Attribution {
+    for (const [clientId, owner] of this.room.awarenessOwners) {
+      if (owner !== this) continue;
+      const state = this.room.awareness.getStates().get(clientId) as
+        { user?: { id?: unknown } } | undefined;
+      const userId = typeof state?.user?.id === "string" ? state.user.id : null;
+      return { clientId, userId: this.identity.userId ?? userId };
+    }
+    return { clientId: null, userId: this.identity.userId };
+  }
+
+  protected override beginSync(): void {
+    // Start the handshake: send our state vector so the client sends what we're missing.
+    this.send(
+      encodeMessage(MESSAGE_SYNC, (encoder) => {
+        syncProtocol.writeSyncStep1(encoder, this.room.doc);
+      }),
+    );
+    const others = [...this.room.awareness.getStates().keys()];
+    if (others.length > 0)
+      this.send(encodeAwarenessMessage(encodeAwarenessUpdate(this.room.awareness, others)));
+    this.send(this.room.persistedMessage());
+  }
+
+  protected override handleType(type: number, decoder: decoding.Decoder, bytes: number): void {
+    if (type === MESSAGE_SYNC) this.handleSync(decoder, bytes);
+    else if (type === MESSAGE_AWARENESS) this.handleAwareness(decoding.readVarUint8Array(decoder));
+    else throw new Error(`unknown message type ${String(type)}`);
   }
 
   private handleSync(decoder: decoding.Decoder, bytes: number): void {

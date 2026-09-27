@@ -13,6 +13,12 @@ export type ShareRole = z.infer<typeof shareRoleSchema>;
 
 const titleSchema = z.string().trim().min(1).max(120);
 
+/**
+ * An AES-GCM envelope made in the browser (see sync/e2e.ts), base64 in JSON. The server
+ * stores it as bytes and never reads it. 512 bytes of base64 covers a 120-character title.
+ */
+export const envelopeBase64Schema = z.base64().min(40).max(1024);
+
 export const profileSchema = z.object({
   id: z.uuid(),
   email: z.string().nullable(),
@@ -38,8 +44,11 @@ export const boardSummarySchema = z.object({
   updatedAt: z.string(),
   deletedAt: z.string().nullable(),
   lastOpenedAt: z.string().nullable(),
-  /** Short-lived signed URL, or null if no thumbnail yet. */
+  /** Short-lived signed URL, or null if no thumbnail yet (always null for private boards). */
   thumbnailUrl: z.string().nullable(),
+  isPrivate: z.boolean(),
+  /** Private boards: the title encrypted with the board key (`title` is a placeholder). */
+  encryptedTitle: envelopeBase64Schema.nullable(),
 });
 export type BoardSummary = z.infer<typeof boardSummarySchema>;
 
@@ -51,15 +60,34 @@ export const boardListQuerySchema = z.object({
   folderId: z.uuid().optional(),
 });
 
+/** Placeholder stored as a private board's `title`; the real one is encrypted. */
+export const PRIVATE_BOARD_TITLE = "Private board";
+
 export const createBoardSchema = z.object({
   title: titleSchema.optional(),
   folderId: z.uuid().nullable().optional(),
+  /**
+   * An end-to-end encrypted board (Pro/Team). The browser picks the id, because the
+   * encryption binds every envelope to the board id and the key must exist before the row.
+   */
+  private: z
+    .object({
+      id: z.uuid(),
+      keyCheck: envelopeBase64Schema,
+      encryptedTitle: envelopeBase64Schema,
+    })
+    .optional(),
 });
 export const updateBoardSchema = z
-  .object({ title: titleSchema.optional(), folderId: z.uuid().nullable().optional() })
-  .refine((v) => v.title !== undefined || v.folderId !== undefined, {
-    message: "nothing to update",
-  });
+  .object({
+    title: titleSchema.optional(),
+    encryptedTitle: envelopeBase64Schema.optional(),
+    folderId: z.uuid().nullable().optional(),
+  })
+  .refine(
+    (v) => v.title !== undefined || v.encryptedTitle !== undefined || v.folderId !== undefined,
+    { message: "nothing to update" },
+  );
 
 export const sharingSettingsSchema = z.object({ isPublic: z.boolean() });
 
@@ -133,6 +161,11 @@ export const boardDetailSchema = z.object({
   title: z.string(),
   role: boardRoleSchema,
   isPublic: z.boolean(),
+  // Defaults: details cached on a device before private boards existed still parse.
+  isPrivate: z.boolean().default(false),
+  /** Private boards only (null otherwise). */
+  encryptedTitle: envelopeBase64Schema.nullable().default(null),
+  keyCheck: envelopeBase64Schema.nullable().default(null),
 });
 export type BoardDetail = z.infer<typeof boardDetailSchema>;
 

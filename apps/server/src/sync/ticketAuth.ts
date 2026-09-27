@@ -44,7 +44,13 @@ export function ticketAuthorizer(tickets: TicketIssuer, db: Database): Authorize
     const role = lowerRole(claims.role, current);
     return {
       ok: true,
-      identity: { userId: claims.userId, role, linkId: claims.linkId, viaPublic: claims.viaPublic },
+      identity: {
+        userId: claims.userId,
+        role,
+        linkId: claims.linkId,
+        viaPublic: claims.viaPublic,
+        encrypted: current.isPrivate,
+      },
     };
   };
 }

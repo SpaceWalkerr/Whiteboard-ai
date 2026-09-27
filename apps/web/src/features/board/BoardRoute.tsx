@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useParams } from "react-router";
 import { boardDetailSchema, ticketResponseSchema } from "@whiteboard/shared/api";
 import type { WebEnv } from "@whiteboard/shared/env/web";
-import { boardIdSchema } from "@whiteboard/shared/sync";
+import { boardIdSchema, bytesToBase64, encryptText, type RoomKey } from "@whiteboard/shared/sync";
 import { useAuth } from "@/auth/authContext";
 import { FullPageMessage, LoadingPage } from "@/auth/RequireAuth";
 import {
@@ -16,6 +16,10 @@ import { profileFromSession } from "@/auth/sessionProfile";
 import { ApiRequestError } from "@/lib/apiClient";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { BoardPage, type TicketFetchResult } from "./BoardPage";
+import { rememberKey } from "./e2e/keyring";
+import { PrivateBoardGate } from "./e2e/PrivateBoardGate";
+import { isNewPrivateBoard, type UnlockedBoard } from "./e2e/privateBoards";
+import { keyFromHash } from "./e2e/roomKey";
 import { presenceUserFor } from "./sync/identity";
 
 /**
@@ -96,10 +100,14 @@ export function BoardRoute({ env }: { env: WebEnv }) {
   }, [boardId, fetchTicket]);
 
   const renameBoard = useCallback(
-    async (title: string) => {
+    async (title: string, roomKey?: RoomKey) => {
+      // A private board's title is encrypted like its content.
+      const body = roomKey
+        ? { encryptedTitle: bytesToBase64(await encryptText(roomKey, "title", title)) }
+        : { title };
       await api.request(`/boards/${boardId}`, {
         method: "PATCH",
-        body: { title },
+        body,
         schema: boardDetailSchema,
         shareToken,
       });
@@ -113,7 +121,10 @@ export function BoardRoute({ env }: { env: WebEnv }) {
   if (detail.isError) {
     const code = detail.error instanceof ApiRequestError ? detail.error.status : -1;
     if (code === 401) {
-      rememberReturnTo(`${location.pathname}${location.search}`);
+      // A private board's key survives the trip through sign-in on this device only.
+      const key = keyFromHash(location.hash);
+      if (key) void rememberKey(boardId, key);
+      rememberReturnTo(`${location.pathname}${location.search}${location.hash}`);
       return <Navigate to="/sign-in" replace />;
     }
     if (code === 403) {
@@ -140,7 +151,7 @@ export function BoardRoute({ env }: { env: WebEnv }) {
     status === "signedIn" ? (profile ?? profileFromSession(session)) : null,
     guestId,
   );
-  return (
+  const page = (unlocked: UnlockedBoard | null) => (
     <BoardPage
       key={boardId}
       boardId={boardId}
@@ -149,7 +160,11 @@ export function BoardRoute({ env }: { env: WebEnv }) {
       detail={detail.data}
       me={me}
       fetchTicket={getTicket}
-      onTitleChange={renameBoard}
+      onTitleChange={(title) => renameBoard(title, unlocked?.roomKey)}
+      unlocked={unlocked}
+      justCreated={isNewPrivateBoard(location.state)}
     />
   );
+  if (!detail.data.isPrivate) return page(null);
+  return <PrivateBoardGate detail={detail.data}>{page}</PrivateBoardGate>;
 }

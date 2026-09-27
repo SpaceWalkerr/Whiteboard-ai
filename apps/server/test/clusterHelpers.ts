@@ -44,7 +44,7 @@ export const userFromProtocol: AuthorizeConnection = (request: IncomingMessage) 
   const userId = offered ? offered.slice(TICKET_PROTOCOL_PREFIX.length) : null;
   return Promise.resolve({
     ok: true,
-    identity: { userId, role: "editor", linkId: null, viaPublic: false },
+    identity: { userId, role: "editor", linkId: null, viaPublic: false, encrypted: false },
   });
 };
 
@@ -110,6 +110,8 @@ export async function startCluster(
     /** Replaces the Redis lease (e.g. an always-granting one to force a split brain). */
     lease?: (instanceId: string, redis: Redis) => PersistenceLease;
     wrapBus?: (bus: RoomBus) => RoomBus;
+    /** Replaces the default test identity (e.g. to open private rooms). */
+    authorize?: AuthorizeConnection;
   } = {},
 ): Promise<TestCluster> {
   const repository = options.repository ?? new MemoryBoardRepository();
@@ -123,7 +125,7 @@ export async function startCluster(
     const revocations = new RedisRevocationBus(redis, silentLogger, id);
     const server = await startServer({
       repository,
-      authorize: userFromProtocol,
+      authorize: options.authorize ?? userFromProtocol,
       flushMs: options.flushMs ?? 5,
       graceMs: options.graceMs ?? 50,
       revocations,

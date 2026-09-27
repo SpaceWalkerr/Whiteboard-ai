@@ -68,7 +68,7 @@ import {
   toPublicState,
   type InterviewRow,
 } from "../interview/service";
-import { authorize, shareTokenOf } from "./boards";
+import { authorize, refuseIfPrivate, shareTokenOf } from "./boards";
 import type { ApiDeps, Tx } from "./deps";
 import { parse } from "./validation";
 
@@ -256,6 +256,10 @@ export function registerInterviewRoutes(app: FastifyInstance, deps: ApiDeps): vo
     const access = await authorize(deps, id, user.id, "write", {
       shareToken: shareTokenOf(request),
     });
+    refuseIfPrivate(
+      access,
+      "Interviews can't run on private boards: replay and the summary need the server to read the board.",
+    );
     await requireTeamPlan(user.id);
     const question = findQuestion(body.questionId);
     if (!question) throw new BadRequestError("Unknown question.");

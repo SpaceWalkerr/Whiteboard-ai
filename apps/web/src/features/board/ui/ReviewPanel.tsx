@@ -37,6 +37,8 @@ interface ReviewPanelProps {
   /** Live hints toggle (Pro+); null hides it (viewers). */
   hints: {
     available: boolean;
+    /** Why hints can't run here regardless of plan (e.g. a private board); null if none. */
+    unavailableReason: string | null;
     enabled: boolean;
     notice: string | null;
     onToggle: (enabled: boolean) => void;
@@ -437,11 +439,14 @@ export function ReviewPanel({
                 className="size-4 accent-foreground"
               />
               Live hints while I draw
-              {!hints.available && (
+              {!hints.available && !hints.unavailableReason && (
                 <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">Pro</span>
               )}
             </label>
-            {!hints.available && (
+            {hints.unavailableReason && (
+              <p className="text-xs text-muted-foreground">{hints.unavailableReason}</p>
+            )}
+            {!hints.available && !hints.unavailableReason && (
               <Button
                 variant="link"
                 size="sm"

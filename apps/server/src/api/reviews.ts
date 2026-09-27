@@ -10,6 +10,8 @@ import {
   overallScore,
   reviewRecordSchema,
   reviewRequestSchema,
+  runRules,
+  type DesignCheckResult,
   type HintsResponse,
   type ReviewRecord,
   type ReviewStreamEvent,
@@ -41,6 +43,7 @@ import { runHints, runReview, type CallOutcome } from "../ai/reviewer";
 import { recordUsage, spendTodayMicros } from "../ai/usage";
 import { requireUser } from "../auth/requestAuth";
 import {
+  BadRequestError,
   ForbiddenError,
   NotFoundError,
   PayloadTooLargeError,
@@ -49,7 +52,7 @@ import {
   TooManyRequestsError,
   UnprocessableError,
 } from "../errors";
-import { authorize, shareTokenOf } from "./boards";
+import { authorize, refuseIfPrivate, shareTokenOf } from "./boards";
 import { activeInterviewContext } from "./interviews";
 import type { AiConfig, ApiDeps } from "./deps";
 import { parse } from "./validation";
@@ -120,7 +123,8 @@ function sha256(value: string): string {
  * them, not even in the list.
  */
 function visibleTo(userId: string) {
-  return sql`(${reviews.interviewId} is null or exists (
+  // A null graph is a private board's review running without being stored: never listed.
+  return sql`${reviews.graph} is not null and (${reviews.interviewId} is null or exists (
     select 1 from ${interviewParticipants} p
     where p.interview_id = ${reviews.interviewId} and p.user_id = ${userId}
       and p.role in ('interviewer', 'observer')))`;
@@ -172,6 +176,44 @@ async function loadReviewRecord(
     review: row.result === null ? null : aiReviewSchema.parse(row.result),
     graph: designGraphSchema.parse(row.graph),
     ruleFindings: z.array(findingSchema).parse(row.ruleFindings),
+  });
+}
+
+/**
+ * The finished review of a private board the user didn't want stored: built in memory and
+ * streamed to the requester only; the server keeps nothing but the usage row.
+ */
+async function unstoredReviewRecord(
+  deps: ApiDeps,
+  input: {
+    reviewId: string;
+    boardId: string;
+    userId: string;
+    body: { problemStatement: string; requirements: string };
+    design: DesignCheckResult;
+    result: unknown;
+    model: string;
+  },
+): Promise<ReviewRecord> {
+  const [profile] = await deps.db
+    .select({ name: profiles.displayName, email: profiles.email })
+    .from(profiles)
+    .where(eq(profiles.id, input.userId));
+  const now = new Date().toISOString();
+  return reviewRecordSchema.parse({
+    id: input.reviewId,
+    boardId: input.boardId,
+    status: "completed",
+    requestedBy: { id: input.userId, name: profile?.name ?? profile?.email ?? "You" },
+    problemStatement: input.body.problemStatement,
+    requirements: input.body.requirements,
+    model: input.model,
+    createdAt: now,
+    completedAt: now,
+    errorCode: null,
+    review: input.result,
+    graph: input.design.graph,
+    ruleFindings: input.design.findings,
   });
 }
 
@@ -282,7 +324,19 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       const user = requireUser(request);
       const { id } = parse(idParams, request.params);
       const body = parse(reviewRequestSchema, request.body ?? {});
-      await authorize(deps, id, user.id, "read", { shareToken: shareTokenOf(request) });
+      const access = await authorize(deps, id, user.id, "read", {
+        shareToken: shareTokenOf(request),
+      });
+      const privateInput = body.private;
+      // Normal boards are always read from the database, never from the request; private
+      // boards can't be read by the server, so their graph must come with explicit consent.
+      if (access.isPrivate && !privateInput)
+        throw new BadRequestError(
+          "This board is end-to-end encrypted: confirm sending its graph for this review.",
+        );
+      if (!access.isPrivate && privateInput)
+        throw new BadRequestError("Only private boards send their graph with the request.");
+      const store = privateInput?.store ?? true;
       // During an interview the AI reviews for the hiring side only; the review is tagged
       // with the interview so the candidate never sees it.
       const interview = await activeInterviewContext(deps, id, user.id);
@@ -295,7 +349,10 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
           "AI reviews aren't available right now.",
         );
 
-      const design = await loadDesign(deps.boardStore, id);
+      // The rules always run here, on whichever graph is reviewed.
+      const design: DesignCheckResult = privateInput
+        ? { graph: privateInput.graph, ...runRules(privateInput.graph) }
+        : await loadDesign(deps.boardStore, id);
       if (design.graph.nodes.length === 0)
         throw new UnprocessableError(
           "EMPTY_DESIGN",
@@ -306,14 +363,15 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
           `This board has too many components and connections for an AI review (limit ${String(ai.maxElements)}).`,
         );
 
+      // Not stored: the row is only a quota reservation, with no content, deleted at the end.
       const reviewId = await reserveReview(deps.db, {
         boardId: id,
         userId: user.id,
-        problemStatement: body.problemStatement,
-        requirements: body.requirements,
-        graph: design.graph,
+        problemStatement: store ? body.problemStatement : "",
+        requirements: store ? body.requirements : "",
+        graph: store ? design.graph : null,
         graphFormatVersion: GRAPH_FORMAT_VERSION,
-        ruleFindings: design.findings,
+        ruleFindings: store ? design.findings : [],
         model: ai.review.model,
         interviewId: interview?.interviewId ?? null,
       });
@@ -356,15 +414,18 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
             { kind: "review", userId: user.id, boardId: id, reviewId },
             call,
           );
-          await tx
-            .update(reviews)
-            .set({
-              status: completed ? "completed" : "failed",
-              result,
-              errorCode: completed ? null : call.status,
-              completedAt: new Date(),
-            })
-            .where(eq(reviews.id, reviewId));
+          if (store)
+            await tx
+              .update(reviews)
+              .set({
+                status: completed ? "completed" : "failed",
+                result,
+                errorCode: completed ? null : call.status,
+                completedAt: new Date(),
+              })
+              .where(eq(reviews.id, reviewId));
+          // Usage (tokens, cost) keeps counting toward the quota; the content goes.
+          else await tx.delete(reviews).where(eq(reviews.id, reviewId));
           return usd;
         });
         usageRecorded = true;
@@ -380,7 +441,17 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
           log.info(logFields, "AI review completed");
           stream.send({
             type: "done",
-            review: await loadReviewRecord(deps, id, reviewId, user.id),
+            review: store
+              ? await loadReviewRecord(deps, id, reviewId, user.id)
+              : await unstoredReviewRecord(deps, {
+                  reviewId,
+                  boardId: id,
+                  userId: user.id,
+                  body,
+                  design,
+                  result,
+                  model: ai.review.model,
+                }),
           });
         } else {
           log.warn({ ...logFields, err: call.error }, "AI review failed");
@@ -398,14 +469,17 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
           ).catch((usageError: unknown) => {
             log.error({ err: usageError }, "could not record AI usage");
           });
-        // Don't leave the reservation holding quota.
-        await deps.db
-          .update(reviews)
-          .set({ status: "failed", errorCode: "server_error", completedAt: new Date() })
-          .where(and(eq(reviews.id, reviewId), eq(reviews.status, "running")))
-          .catch((updateError: unknown) => {
-            log.error({ err: updateError }, "could not mark review failed");
-          });
+        // Don't leave the reservation holding quota (or, unstored, any row at all).
+        await (
+          store
+            ? deps.db
+                .update(reviews)
+                .set({ status: "failed", errorCode: "server_error", completedAt: new Date() })
+                .where(and(eq(reviews.id, reviewId), eq(reviews.status, "running")))
+            : deps.db.delete(reviews).where(eq(reviews.id, reviewId))
+        ).catch((updateError: unknown) => {
+          log.error({ err: updateError }, "could not mark review failed");
+        });
         const failure = FAILURE_MESSAGES.error;
         if (failure) stream.send({ type: "error", ...failure });
       } finally {
@@ -424,7 +498,13 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
     async (request): Promise<HintsResponse> => {
       const user = requireUser(request);
       const { id } = parse(idParams, request.params);
-      await authorize(deps, id, user.id, "write", { shareToken: shareTokenOf(request) });
+      const access = await authorize(deps, id, user.id, "write", {
+        shareToken: shareTokenOf(request),
+      });
+      refuseIfPrivate(
+        access,
+        "Live hints are off for private boards: they would send the board to the server on every change.",
+      );
       // No AI help while an interview is running on this board.
       if (await activeInterviewContext(deps, id, user.id)) return { hints: [], skipped: true };
       const entitlement = await getEntitlement(deps.db, user.id);

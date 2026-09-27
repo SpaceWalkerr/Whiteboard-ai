@@ -15,7 +15,10 @@ import { LocalRoomBus, type RoomBus } from "../cluster/roomBus";
 import type { PublicInterviewState } from "@whiteboard/shared/interview";
 import type { RevocationBus, RevocationEvent } from "../revocation/bus";
 import type { AuthorizeConnection } from "./auth";
-import { SyncConnection } from "./connection";
+import { SyncConnection, type RoomConnection } from "./connection";
+import { EncryptedConnection } from "./encryptedConnection";
+import { EncryptedRoom } from "./encryptedRoom";
+import { Room } from "./rooms";
 import type { SyncMetrics } from "./metrics";
 import { TokenBucket } from "./rateLimit";
 import { RoomManager, type RoomManagerOptions } from "./rooms";
@@ -96,7 +99,7 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     resyncMs: options.cluster?.resyncMs ?? 15_000,
   });
   let accepting = true;
-  const connections = new Set<SyncConnection>();
+  const connections = new Set<RoomConnection>();
 
   const reject = (socket: Duplex, status: number, reason: string, metric: string) => {
     metrics.rejected.inc({ reason: metric });
@@ -148,8 +151,8 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
           return;
         }
         wss.handleUpgrade(request, socket, head, (ws) => {
-          const room = rooms.acquire(boardId);
-          const connection = new SyncConnection(ws, room, result.identity, {
+          const room = rooms.acquire(boardId, result.identity.encrypted);
+          const connectionOptions = {
             rateLimiter: new TokenBucket(options.rateLimit.burst, options.rateLimit.perSecond),
             byteLimiter: new TokenBucket(
               options.rateLimit.bytesBurst,
@@ -158,23 +161,36 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
             metrics,
             logger,
             maxBufferedBytes: options.maxBufferedBytes ?? 4 * 1024 * 1024,
-            onClose: (closed) => {
+            onClose: (closed: RoomConnection) => {
               connections.delete(closed);
               metrics.connectionsActive.set(connections.size);
               rooms.leave(closed.room, closed);
             },
-          });
+          };
+          let connection: RoomConnection;
+          if (room instanceof EncryptedRoom)
+            connection = new EncryptedConnection(ws, room, result.identity, connectionOptions);
+          else if (room instanceof Room)
+            connection = new SyncConnection(ws, room, result.identity, connectionOptions);
+          else throw new Error("unknown room kind");
           rooms.join(room, connection);
           logger.info(
-            { boardId, userId: result.identity.userId, role: result.identity.role },
+            {
+              boardId,
+              userId: result.identity.userId,
+              role: result.identity.role,
+              encrypted: result.identity.encrypted,
+            },
             "sync connection opened",
           );
           connections.add(connection);
           metrics.connectionsActive.set(connections.size);
           connection.start();
-          void room.ready.then((load) => {
-            if (load.ok) void sendInterviewState(boardId, [connection]);
-          });
+          // Interviews never run on private boards.
+          if (!result.identity.encrypted)
+            void room.ready.then((load) => {
+              if (load.ok) void sendInterviewState(boardId, [connection]);
+            });
         });
       },
       (error: unknown) => {
@@ -185,7 +201,7 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
   });
 
   /** Loads the board's public interview state and sends it to the given sockets. */
-  const sendInterviewState = async (boardId: string, targets: SyncConnection[]) => {
+  const sendInterviewState = async (boardId: string, targets: RoomConnection[]) => {
     if (!options.interviewState || targets.length === 0) return;
     try {
       const state = await options.interviewState(boardId);
@@ -197,7 +213,7 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
     }
   };
 
-  const affects = (connection: SyncConnection, event: RevocationEvent): boolean => {
+  const affects = (connection: RoomConnection, event: RevocationEvent): boolean => {
     if (connection.room.boardId !== event.boardId) return false;
     switch (event.type) {
       case "interview":

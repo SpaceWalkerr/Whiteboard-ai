@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { acceptedInviteSchema, resolvedShareLinkSchema } from "@whiteboard/shared/api";
 import { Button } from "@/components/ui/button";
 import { ApiRequestError } from "@/lib/apiClient";
@@ -12,6 +12,8 @@ export function ShareLinkPage() {
   const { token = "" } = useParams();
   const { api } = useAuth();
   const navigate = useNavigate();
+  // A private board's link carries its key in the fragment: pass it on to the board.
+  const { hash } = useLocation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -23,12 +25,12 @@ export function ShareLinkPage() {
       })
       .then(({ boardId }) => {
         rememberShareToken(boardId, token);
-        void navigate(`/board/${boardId}`, { replace: true });
+        void navigate({ pathname: `/board/${boardId}`, hash }, { replace: true });
       })
       .catch((e: unknown) => {
         setError(e instanceof ApiRequestError ? e.message : "Something went wrong.");
       });
-  }, [api, token, navigate]);
+  }, [api, token, navigate, hash]);
 
   if (error) {
     return (
@@ -48,18 +50,19 @@ export function InvitePage() {
   const { token = "" } = useParams();
   const { api, signOut, session } = useAuth();
   const navigate = useNavigate();
+  const { hash } = useLocation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void api
       .request("/invites/accept", { method: "POST", body: { token }, schema: acceptedInviteSchema })
       .then(({ boardId }) => {
-        void navigate(`/board/${boardId}`, { replace: true });
+        void navigate({ pathname: `/board/${boardId}`, hash }, { replace: true });
       })
       .catch((e: unknown) => {
         setError(e instanceof ApiRequestError ? e.message : "Something went wrong.");
       });
-  }, [api, token, navigate]);
+  }, [api, token, navigate, hash]);
 
   if (error) {
     return (

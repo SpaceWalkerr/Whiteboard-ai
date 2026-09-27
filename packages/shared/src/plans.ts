@@ -13,13 +13,15 @@ export interface PlanLimits {
   liveHints: boolean;
   /** Interview mode: roles, question bank, timer, private notes, scorecard, replay. */
   interviewMode: boolean;
+  /** Private boards: end-to-end encrypted, the server can't read them. */
+  privateRooms: boolean;
 }
 
 export const PLAN_LIMITS: Record<Plan, PlanLimits> = {
-  free: { aiReviewsPerMonth: 5, liveHints: false, interviewMode: false },
-  pro: { aiReviewsPerMonth: 100, liveHints: true, interviewMode: false },
+  free: { aiReviewsPerMonth: 5, liveHints: false, interviewMode: false, privateRooms: false },
+  pro: { aiReviewsPerMonth: 100, liveHints: true, interviewMode: false, privateRooms: true },
   // Per seat; pooling across an organization's seats arrives with team billing (Phase 10).
-  team: { aiReviewsPerMonth: 300, liveHints: true, interviewMode: true },
+  team: { aiReviewsPerMonth: 300, liveHints: true, interviewMode: true, privateRooms: true },
 };
 
 export const PLAN_NAMES: Record<Plan, string> = { free: "Free", pro: "Pro", team: "Team" };

@@ -19,6 +19,7 @@ import {
   type CompactionResult,
   type LoadedBoard,
   type NewUpdate,
+  type StoredUpdate,
 } from "./repository";
 
 export class PgBoardRepository implements BoardRepository {
@@ -97,11 +98,13 @@ export class PgBoardRepository implements BoardRepository {
       // Lock the board row so two compactions of one board (e.g. two instances in Phase 5)
       // never interleave.
       const [locked] = await tx
-        .select({ id: boards.id })
+        .select({ id: boards.id, isPrivate: boards.isPrivate })
         .from(boards)
         .where(eq(boards.id, boardId))
         .for("update");
-      if (!locked) return null;
+      // A private board's updates are ciphertext: merging them is impossible (and must never
+      // be attempted); its clients upload snapshots instead (installSnapshot).
+      if (!locked || locked.isPrivate) return null;
 
       const [snapshot] = await tx
         .select({ seqUpto: boardSnapshots.seqUpto, state: boardSnapshots.state })
@@ -140,5 +143,68 @@ export class PgBoardRepository implements BoardRepository {
       await tx.delete(boardUpdates).where(range);
       return { seqUpto: last.seq, compacted: updates.length };
     });
+  }
+
+  async installSnapshot(
+    boardId: string,
+    seqUpto: number,
+    state: Uint8Array,
+  ): Promise<number | null> {
+    return this.db.transaction(async (tx) => {
+      // Same row lock as appends and compaction: nothing interleaves with the move.
+      const [locked] = await tx
+        .select({ lastSeq: boards.lastSeq, isPrivate: boards.isPrivate })
+        .from(boards)
+        .where(eq(boards.id, boardId))
+        .for("update");
+      if (!locked?.isPrivate || seqUpto > locked.lastSeq) return null;
+      const [latest] = await tx
+        .select({ seqUpto: boardSnapshots.seqUpto })
+        .from(boardSnapshots)
+        .where(eq(boardSnapshots.boardId, boardId))
+        .orderBy(desc(boardSnapshots.seqUpto))
+        .limit(1);
+      if (seqUpto <= (latest?.seqUpto ?? 0)) return null;
+
+      await tx.insert(boardSnapshots).values({ boardId, seqUpto, state });
+      const range = and(eq(boardUpdates.boardId, boardId), lte(boardUpdates.seq, seqUpto));
+      await tx.insert(boardUpdateArchive).select(
+        tx
+          .select({
+            boardId: boardUpdates.boardId,
+            seq: boardUpdates.seq,
+            update: boardUpdates.update,
+            clientId: boardUpdates.clientId,
+            userId: boardUpdates.userId,
+            createdAt: boardUpdates.createdAt,
+          })
+          .from(boardUpdates)
+          .where(range),
+      );
+      const moved = await tx.delete(boardUpdates).where(range).returning({ seq: boardUpdates.seq });
+      return moved.length;
+    });
+  }
+
+  async updatesSince(boardId: string, afterSeq: number): Promise<StoredUpdate[]> {
+    const columns = (table: typeof boardUpdates | typeof boardUpdateArchive) => ({
+      seq: table.seq,
+      update: table.update,
+      clientId: table.clientId,
+      userId: table.userId,
+    });
+    // Live rows first, then the archive: a compaction committing in between moves rows from
+    // the first to the second, so they're seen twice (deduplicated) rather than not at all.
+    const live = await this.db
+      .select(columns(boardUpdates))
+      .from(boardUpdates)
+      .where(and(eq(boardUpdates.boardId, boardId), gt(boardUpdates.seq, afterSeq)));
+    const archived = await this.db
+      .select(columns(boardUpdateArchive))
+      .from(boardUpdateArchive)
+      .where(and(eq(boardUpdateArchive.boardId, boardId), gt(boardUpdateArchive.seq, afterSeq)));
+    const bySeq = new Map<number, StoredUpdate>();
+    for (const row of [...archived, ...live]) bySeq.set(row.seq, row);
+    return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
   }
 }

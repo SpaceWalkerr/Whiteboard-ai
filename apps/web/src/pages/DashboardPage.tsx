@@ -4,6 +4,7 @@ import {
   Folder,
   FolderPlus,
   LayoutGrid,
+  Lock,
   LogOut,
   MoreHorizontal,
   Pencil,
@@ -36,6 +37,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { rememberedKeyCount } from "@/features/board/e2e/keyring";
+import {
+  createPrivateBoard,
+  NEW_PRIVATE_BOARD_STATE,
+  PRIVATE_LIMITS,
+  renamePrivateBoard,
+  usePrivateTitle,
+} from "@/features/board/e2e/privateBoards";
+import { withKey } from "@/features/board/e2e/roomKey";
+import { UpgradeDialog } from "@/features/board/ui/UpgradeDialog";
 import { ApiRequestError } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -107,6 +118,27 @@ export function DashboardPage() {
     onSuccess: (board) => navigate(`/board/${board.id}`),
     onError,
   });
+  const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
+  const createPrivate = useMutation({
+    mutationFn: () => createPrivateBoard(api, folderId),
+    onSuccess: ({ board, encodedKey }) =>
+      navigate(withKey(`/board/${board.id}`, encodedKey), { state: NEW_PRIVATE_BOARD_STATE }),
+    onError: (e) => {
+      if (e instanceof ApiRequestError && e.status === 402) setUpgradeMessage(e.message);
+      else onError(e);
+    },
+  });
+  // Signing out wipes the keys of private boards from this device: warn first.
+  const [signOutWarning, setSignOutWarning] = useState<{
+    everywhere: boolean;
+    keys: number;
+  } | null>(null);
+  const requestSignOut = (everywhere: boolean) => {
+    void rememberedKeyCount().then((keys) => {
+      if (keys > 0) setSignOutWarning({ everywhere, keys });
+      else void signOut(everywhere);
+    });
+  };
 
   return (
     <div className="min-h-svh">
@@ -122,10 +154,18 @@ export function DashboardPage() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem disabled>{session?.user.email}</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void signOut(false)}>
+            <DropdownMenuItem
+              onSelect={() => {
+                requestSignOut(false);
+              }}
+            >
               <LogOut aria-hidden="true" /> Sign out
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void signOut(true)}>
+            <DropdownMenuItem
+              onSelect={() => {
+                requestSignOut(true);
+              }}
+            >
               <LogOut aria-hidden="true" /> Sign out everywhere
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -144,14 +184,26 @@ export function DashboardPage() {
         <main className="grid min-w-0 flex-1 content-start gap-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-2xl font-bold tracking-tight">{folderName ?? "Boards"}</h1>
-            <Button
-              onClick={() => {
-                create.mutate();
-              }}
-              disabled={create.isPending}
-            >
-              <Plus aria-hidden="true" /> New board
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                title="End-to-end encrypted: only people with the link's key can read it (Pro and Team)"
+                onClick={() => {
+                  createPrivate.mutate();
+                }}
+                disabled={createPrivate.isPending}
+              >
+                <Lock aria-hidden="true" /> New private board
+              </Button>
+              <Button
+                onClick={() => {
+                  create.mutate();
+                }}
+                disabled={create.isPending}
+              >
+                <Plus aria-hidden="true" /> New board
+              </Button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -209,6 +261,7 @@ export function DashboardPage() {
               {error}
             </p>
           )}
+          {q && <p className="text-xs text-muted-foreground">{PRIVATE_LIMITS.search}</p>}
           {view === "trash" && (
             <p className="text-sm text-muted-foreground">
               Deleted boards stay here for 30 days, then they're removed for good.
@@ -247,6 +300,49 @@ export function DashboardPage() {
           </section>
         </main>
       </div>
+      <UpgradeDialog
+        message={upgradeMessage}
+        onOpenChange={(open) => {
+          if (!open) setUpgradeMessage(null);
+        }}
+      />
+      <Dialog
+        open={signOutWarning !== null}
+        onOpenChange={(open) => {
+          if (!open) setSignOutWarning(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Sign out and forget private board keys?</DialogTitle>
+            <DialogDescription>
+              Signing out removes the keys of {String(signOutWarning?.keys ?? 0)} private{" "}
+              {signOutWarning?.keys === 1 ? "board" : "boards"} from this device. To open them again
+              you&apos;ll need their links with the key. We can&apos;t recover a lost key.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSignOutWarning(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const everywhere = signOutWarning?.everywhere ?? false;
+                setSignOutWarning(null);
+                void signOut(everywhere);
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -269,6 +365,9 @@ function BoardCard({
   const [renaming, setRenaming] = useState(false);
   const owner = board.role === "owner";
   const trash = view === "trash";
+  const privateTitle = usePrivateTitle(board);
+  // A private board's title is shown only when this device has its key.
+  const title = board.isPrivate ? (privateTitle ?? "Private board") : board.title;
 
   const run = (fn: () => Promise<unknown>) => {
     fn().then(onChanged, onError);
@@ -277,7 +376,12 @@ function BoardCard({
   const card = (
     <>
       <div className="aspect-[16/10] overflow-hidden rounded-t-lg border-b bg-muted">
-        {board.thumbnailUrl ? (
+        {board.isPrivate ? (
+          <div className="flex size-full flex-col items-center justify-center gap-1 text-muted-foreground">
+            <Lock aria-hidden="true" className="size-6 opacity-60" />
+            <span className="px-4 text-center text-xs">{PRIVATE_LIMITS.thumbnail}</span>
+          </div>
+        ) : board.thumbnailUrl ? (
           <img
             src={board.thumbnailUrl}
             alt=""
@@ -291,7 +395,12 @@ function BoardCard({
         )}
       </div>
       <div className="p-3 pr-10">
-        <span className="block truncate font-medium">{board.title}</span>
+        <span className="flex items-center gap-1 truncate font-medium">
+          {board.isPrivate && (
+            <Lock aria-label="End-to-end encrypted" className="size-3.5 shrink-0" />
+          )}
+          <span className="truncate">{title}</span>
+        </span>
         <span className="text-xs text-muted-foreground">
           {trash
             ? `Deleted ${new Date(board.deletedAt ?? board.updatedAt).toLocaleDateString()}`
@@ -319,7 +428,7 @@ function BoardCard({
             variant="ghost"
             size="icon"
             className="absolute right-1 bottom-2"
-            aria-label={`Actions for ${board.title}`}
+            aria-label={`Actions for ${title}`}
           >
             <MoreHorizontal aria-hidden="true" />
           </Button>
@@ -342,6 +451,8 @@ function BoardCard({
             <>
               {board.role !== "viewer" && (
                 <DropdownMenuItem
+                  // A private title can only be re-encrypted with the board's key.
+                  disabled={board.isPrivate && privateTitle === null}
                   onSelect={() => {
                     setRenaming(true);
                   }}
@@ -350,6 +461,7 @@ function BoardCard({
                 </DropdownMenuItem>
               )}
               <DropdownMenuItem
+                disabled={board.isPrivate}
                 onSelect={() => {
                   api
                     .request(`/boards/${board.id}/duplicate`, {
@@ -359,7 +471,8 @@ function BoardCard({
                     .then((copy) => navigate(`/board/${copy.id}`), onError);
                 }}
               >
-                <Copy aria-hidden="true" /> Duplicate
+                <Copy aria-hidden="true" />{" "}
+                {board.isPrivate ? "Duplicate — not for encrypted boards" : "Duplicate"}
               </DropdownMenuItem>
               {owner && folders.length > 0 && (
                 <>
@@ -430,15 +543,17 @@ function BoardCard({
         onOpenChange={setRenaming}
         title="Rename board"
         label="Board title"
-        initial={board.title}
-        onSubmit={(title) => {
+        initial={title}
+        onSubmit={(next) => {
           setRenaming(false);
           run(() =>
-            api.request(`/boards/${board.id}`, {
-              method: "PATCH",
-              body: { title },
-              schema: boardDetailSchema,
-            }),
+            board.isPrivate
+              ? renamePrivateBoard(api, board.id, next)
+              : api.request(`/boards/${board.id}`, {
+                  method: "PATCH",
+                  body: { title: next },
+                  schema: boardDetailSchema,
+                }),
           );
         }}
       />

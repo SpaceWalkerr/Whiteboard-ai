@@ -44,6 +44,16 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * The feature needs to read the board, and this board is end-to-end encrypted: the server
+ * can't (and must not try to). The message tells the user why.
+ */
+export class PrivateBoardError extends AppError {
+  constructor(message: string) {
+    super(409, "PRIVATE_BOARD", message);
+  }
+}
+
 export interface ErrorBody {
   error: { code: string; message: string };
 }

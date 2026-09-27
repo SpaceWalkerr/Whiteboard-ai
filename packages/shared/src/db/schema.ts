@@ -3,6 +3,7 @@ import {
   type AnyPgColumn,
   bigint,
   boolean,
+  check,
   customType,
   index,
   integer,
@@ -70,6 +71,16 @@ export const boards = pgTable(
      * under the row lock, so several sync instances can write one board safely (Phase 5).
      */
     lastSeq: bigint("last_seq", { mode: "number" }).notNull().default(0),
+    /**
+     * End-to-end encrypted (Phase 9): every stored update/snapshot of this board is an
+     * AES-GCM envelope the server can't read, and `title` is a placeholder. Set at creation,
+     * never changed.
+     */
+    isPrivate: boolean("is_private").notNull().default(false),
+    /** Private boards: the real title, encrypted in the browser with the board key. */
+    encryptedTitle: bytea("encrypted_title"),
+    /** Private boards: a known plaintext encrypted with the key, to verify a key before use. */
+    keyCheck: bytea("key_check"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -78,6 +89,10 @@ export const boards = pgTable(
     index("boards_owner_id_idx").on(t.ownerId),
     index("boards_org_id_idx").on(t.orgId),
     index("boards_folder_id_idx").on(t.folderId),
+    check(
+      "boards_private_key_check",
+      sql`${t.isPrivate} = (${t.keyCheck} is not null) and (${t.isPrivate} or ${t.encryptedTitle} is null)`,
+    ),
   ],
 ).enableRLS();
 
@@ -330,8 +345,12 @@ export const reviews = pgTable(
     status: reviewStatus("status").notNull().default("running"),
     problemStatement: text("problem_statement").notNull().default(""),
     requirements: text("requirements").notNull().default(""),
-    /** The extracted graph that was reviewed (what the finding shape ids refer to). */
-    graph: jsonb("graph").$type<unknown>().notNull(),
+    /**
+     * The extracted graph that was reviewed (what the finding shape ids refer to). Null only
+     * while a private board's review runs without the user opting in to storing it: that row
+     * is a quota reservation with no content, deleted when the review ends.
+     */
+    graph: jsonb("graph").$type<unknown>(),
     graphFormatVersion: integer("graph_format_version").notNull(),
     /** Rule-engine findings given to the model as grounding. */
     ruleFindings: jsonb("rule_findings").$type<unknown>().notNull().default([]),

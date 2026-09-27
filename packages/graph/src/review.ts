@@ -29,11 +29,26 @@ export const REVIEW_DIMENSION_LABELS: Record<ReviewDimension, string> = {
 export const PROBLEM_STATEMENT_MAX = 2000;
 export const REQUIREMENTS_MAX = 2000;
 
+/**
+ * Private (end-to-end encrypted) boards: the server can't read the board, so the browser
+ * extracts the graph and sends only that — after the user agreed, for this review, to it
+ * being sent to our server and Anthropic. Nothing is kept unless `store` is true.
+ */
+export const privateReviewInputSchema = z.object({
+  graph: designGraphSchema,
+  consent: z.literal(true),
+  /** Keep this review (graph, problem statement, result) on the server, readable by it. */
+  store: z.boolean(),
+});
+export type PrivateReviewInput = z.infer<typeof privateReviewInputSchema>;
+
 export const reviewRequestSchema = z.object({
   /** E.g. "Design a URL shortener, 100M URLs/day". */
   problemStatement: z.string().trim().max(PROBLEM_STATEMENT_MAX).default(""),
   /** Requirements the user has stated (scale, latency, consistency…). */
   requirements: z.string().trim().max(REQUIREMENTS_MAX).default(""),
+  /** Private boards only (refused for normal boards, whose graph the server reads itself). */
+  private: privateReviewInputSchema.optional(),
 });
 export type ReviewRequest = z.infer<typeof reviewRequestSchema>;
 

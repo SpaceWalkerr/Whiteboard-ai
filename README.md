@@ -147,7 +147,8 @@ packages/
 loadtest/         k6 scenarios, Node load generator and latency probe (docs/scaling.md)
 infra/scale/      nginx config + native runner for the 2-instance scale stack
 docker-compose.scale.yml  The same stack in Docker (scale/load tests only)
-docs/             Design notes (scaling.md: multi-instance sync, measurements)
+docs/             Design notes (scaling.md: multi-instance sync, measurements;
+                  security.md: end-to-end encrypted private boards, threat model)
 render.yaml       Render Blueprint (stub until Phase 13)
 .github/workflows CI: lint, typecheck, build, tests (Supabase Postgres image), Playwright smoke
 ```

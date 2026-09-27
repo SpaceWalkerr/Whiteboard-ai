@@ -19,13 +19,18 @@ export {
   toUint8Array,
   type AwarenessEntry,
 } from "./protocol";
+export { SyncProvider, type SyncProviderOptions } from "./provider";
 export {
-  SyncProvider,
-  type NetworkSignal,
-  type SaveState,
+  RoomSocket,
   type DeniedReason,
-  type TicketResult,
-  type SyncProviderOptions,
+  type NetworkSignal,
+  type RoomSocketOptions,
+  type SaveState,
   type SyncStatus,
+  type TicketResult,
   type WebSocketLike,
-} from "./provider";
+} from "./socketBase";
+export { EncryptedSyncProvider, type EncryptedSyncProviderOptions } from "./encryptedProvider";
+export * from "./encryptedProtocol";
+export * from "./e2e";
+export { missingFrom } from "./missing";

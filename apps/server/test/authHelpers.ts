@@ -12,7 +12,13 @@ import {
   type Database,
   type SqlClient,
 } from "@whiteboard/shared/db";
-import { SyncProvider, type TicketResult, type WebSocketLike } from "@whiteboard/shared/sync";
+import {
+  EncryptedSyncProvider,
+  SyncProvider,
+  type RoomKey,
+  type TicketResult,
+  type WebSocketLike,
+} from "@whiteboard/shared/sync";
 import type { ApiDeps } from "../src/api/deps";
 import { TicketIssuer } from "../src/auth/tickets";
 import { createTokenVerifier } from "../src/auth/verifier";
@@ -127,11 +133,13 @@ export async function startApiServer(
   extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai"> & {
     /** Share events with other instances (e.g. a RedisRevocationBus); local by default. */
     revocations?: LocalRevocationBus;
+    /** Compact (or, for private boards, ask a client for a snapshot) after this many updates. */
+    snapshotEvery?: number;
   } = {},
 ): Promise<ApiServer> {
   const mailer = new MemoryMailer();
   const repository = new PgBoardRepository(db);
-  const { revocations = new LocalRevocationBus(), ...apiExtras } = extras;
+  const { revocations = new LocalRevocationBus(), snapshotEvery = 500, ...apiExtras } = extras;
   const tickets = new TicketIssuer(TEST_TICKET_SECRET);
   const metrics = createSyncMetrics();
   const app = testApp({
@@ -161,7 +169,7 @@ export async function startApiServer(
     },
     repository,
     flushMs: 10,
-    snapshotEvery: 500,
+    snapshotEvery,
     revocations,
     interviewState: (boardId) => loadPublicState(db, boardId),
   });
@@ -194,6 +202,43 @@ export async function startApiServer(
       await app.close();
     },
   };
+}
+
+/** A private board's client: the browser's EncryptedSyncProvider with API-issued tickets. */
+export function ticketedEncryptedClient(
+  server: ApiServer,
+  roomKey: RoomKey,
+  token: string,
+): { doc: Y.Doc; awareness: Awareness; provider: EncryptedSyncProvider } {
+  const doc = new Y.Doc();
+  const awareness = new Awareness(doc);
+  const provider = new EncryptedSyncProvider({
+    serverUrl: server.wsUrl,
+    boardId: roomKey.boardId,
+    doc,
+    awareness,
+    roomKey,
+    network: null,
+    backoff: { initialMs: 20, maxMs: 200 },
+    scheduleFlush: (flush) => {
+      setImmediate(flush);
+    },
+    createSocket: (url, protocols) => {
+      const ws = new WebSocket(url, protocols, { origin: ORIGIN });
+      ws.on("error", () => undefined);
+      return ws as unknown as WebSocketLike;
+    },
+    getTicket: async (): Promise<TicketResult> => {
+      const res = await server.request("POST", `/boards/${roomKey.boardId}/ticket`, {
+        token,
+        body: {},
+      });
+      return res.status === 200
+        ? { ok: true, ticket: (res.body as { ticket: string }).ticket }
+        : { ok: false, reason: res.status === 403 ? "forbidden" : "error" };
+    },
+  });
+  return { doc, awareness, provider };
 }
 
 export interface TicketedClient {

@@ -60,4 +60,13 @@ export interface BoardRepository {
    * archive, in one transaction. Returns null when there is nothing to compact.
    */
   compact(boardId: string, build: BuildSnapshot): Promise<CompactionResult | null>;
+  /**
+   * Private (encrypted) boards, which the server can't compact itself: stores a snapshot
+   * made by a client that covers every update up to `seqUpto`, and archives those updates,
+   * in one transaction. Refused (null) unless `seqUpto` is newer than the latest snapshot
+   * and not beyond the last stored update. Returns how many updates were archived.
+   */
+  installSnapshot(boardId: string, seqUpto: number, state: Uint8Array): Promise<number | null>;
+  /** Every stored update (live or archived) with a seq above `afterSeq`, in seq order. */
+  updatesSince(boardId: string, afterSeq: number): Promise<StoredUpdate[]>;
 }

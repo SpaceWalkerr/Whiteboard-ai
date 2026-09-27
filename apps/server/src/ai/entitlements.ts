@@ -8,6 +8,7 @@ export interface Entitlement {
   reviewsPerMonth: number;
   liveHints: boolean;
   interviewMode: boolean;
+  privateRooms: boolean;
 }
 
 /** A reservation older than this is treated as crashed and stops holding quota. */
@@ -26,6 +27,7 @@ export async function getEntitlement(db: Database | Tx, userId: string): Promise
     reviewsPerMonth: row?.override ?? limits.aiReviewsPerMonth,
     liveHints: limits.liveHints,
     interviewMode: limits.interviewMode,
+    privateRooms: limits.privateRooms,
   };
 }
 
@@ -62,6 +64,7 @@ export interface NewReview {
   userId: string;
   problemStatement: string;
   requirements: string;
+  /** Null: a private board's review the user didn't opt in to storing (no content kept). */
   graph: unknown;
   graphFormatVersion: number;
   ruleFindings: unknown;

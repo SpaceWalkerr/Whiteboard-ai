@@ -22,9 +22,20 @@ export const CLUSTER_KINDS = {
   persisted: 5,
   /** The sender gave up the room's persistence lease; another instance may take it now. */
   leaseReleased: 6,
+  /** Private rooms: one of the sender's clients disconnected (payload: its peer id). */
+  peerLeft: 7,
 } as const;
 
 export type ClusterKind = (typeof CLUSTER_KINDS)[keyof typeof CLUSTER_KINDS];
+
+const KIND_NAMES = new Map<number, string>(
+  Object.entries(CLUSTER_KINDS).map(([name, kind]) => [kind, name]),
+);
+
+/** Metric label for a kind. */
+export function clusterKindName(kind: number): string {
+  return KIND_NAMES.get(kind) ?? "unknown";
+}
 
 const KIND_VALUES = new Set<number>(Object.values(CLUSTER_KINDS));
 const VERSION = 1;

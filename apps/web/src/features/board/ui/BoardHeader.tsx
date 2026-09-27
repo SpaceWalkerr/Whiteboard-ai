@@ -81,6 +81,10 @@ const MESSAGES: Record<DeniedReason, { title: string; body: string }> = {
     title: "This board was deleted",
     body: "It may be restorable from the owner's trash for 30 days.",
   },
+  bad_key: {
+    title: "This board can't be decrypted",
+    body: "Its content doesn't match the key you opened it with. Open it again with the original link that includes the key.",
+  },
 };
 
 /** Shown when the server ends our session because access changed (live revocation). */

@@ -9,6 +9,8 @@ export interface ConnectionIdentity {
   linkId: string | null;
   /** Access only because the board is public (turning that off ends the session). */
   viaPublic: boolean;
+  /** A private board: the room speaks the encrypted protocol only (from the database). */
+  encrypted: boolean;
 }
 
 export type AuthorizationResult =
@@ -28,5 +30,5 @@ export type AuthorizeConnection = (
 export const allowAllConnections: AuthorizeConnection = () =>
   Promise.resolve({
     ok: true,
-    identity: { userId: null, role: "editor", linkId: null, viaPublic: false },
+    identity: { userId: null, role: "editor", linkId: null, viaPublic: false, encrypted: false },
   });

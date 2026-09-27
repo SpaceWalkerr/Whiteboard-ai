@@ -3,7 +3,9 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import { WebSocket } from "ws";
 import {
+  EncryptedSyncProvider,
   SyncProvider,
+  type RoomKey,
   type SyncProviderOptions,
   type SyncStatus,
   type WebSocketLike,
@@ -130,6 +132,67 @@ export function connectClient(
   });
   return { doc, awareness, provider, statuses };
 }
+
+export interface EncryptedTestClient {
+  doc: Y.Doc;
+  awareness: Awareness;
+  provider: EncryptedSyncProvider;
+}
+
+/**
+ * A real EncryptedSyncProvider (the class the browser uses for private boards) over the `ws`
+ * client. `query` is appended to the room URL (test authorizers read the role from it).
+ */
+export function connectEncryptedClient(
+  wsUrl: string,
+  roomKey: RoomKey,
+  options: {
+    getTicket?: SyncProviderOptions["getTicket"];
+    query?: string;
+    reuse?: { doc: Y.Doc; awareness: Awareness };
+  } = {},
+): EncryptedTestClient {
+  const doc = options.reuse?.doc ?? new Y.Doc();
+  const awareness = options.reuse?.awareness ?? new Awareness(doc);
+  const provider = new EncryptedSyncProvider({
+    serverUrl: wsUrl,
+    boardId: roomKey.boardId,
+    doc,
+    awareness,
+    roomKey,
+    ...(options.getTicket ? { getTicket: options.getTicket } : {}),
+    createSocket: (url, protocols) => {
+      const ws = new WebSocket(`${url}${options.query ?? ""}`, protocols, { origin: ORIGIN });
+      ws.on("error", () => undefined);
+      return ws as unknown as WebSocketLike;
+    },
+    network: null,
+    backoff: { initialMs: 20, maxMs: 200 },
+    scheduleFlush: (flush) => {
+      setImmediate(flush);
+    },
+  });
+  return { doc, awareness, provider };
+}
+
+/**
+ * Test authorizer for private rooms: every connection is an anonymous editor of an
+ * encrypted board, or a viewer when the URL has `?role=viewer`.
+ */
+export const allowEncryptedConnections: AuthorizeConnection = (request) =>
+  Promise.resolve({
+    ok: true,
+    identity: {
+      userId: null,
+      role:
+        new URL(request.url ?? "/", "http://x").searchParams.get("role") === "viewer"
+          ? "viewer"
+          : "editor",
+      linkId: null,
+      viaPublic: false,
+      encrypted: true,
+    },
+  });
 
 export async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void> {
   const started = Date.now();
