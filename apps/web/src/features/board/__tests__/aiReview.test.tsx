@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -524,11 +525,34 @@ describe("ReviewPanel", () => {
 
 describe("UpgradeDialog", () => {
   it("explains the limit and compares plans", () => {
-    render(<UpgradeDialog message="You've used all 5 AI reviews." onOpenChange={vi.fn()} />);
-    expect(screen.getByRole("dialog")).toHaveTextContent("You've used all 5 AI reviews.");
+    render(
+      <MemoryRouter>
+        <UpgradeDialog message="You've used all 5 AI reviews." onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("dialog", { name: "Upgrade for more AI reviews" })).toHaveTextContent(
+      "You've used all 5 AI reviews.",
+    );
     const table = screen.getByRole("table", { name: "Plan comparison" });
-    expect(within(table).getByRole("rowheader", { name: /Pro/ })).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "Pro" })).toBeInTheDocument();
     expect(within(table).getByText("100")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "See plans and upgrade" })).toHaveAttribute(
+      "href",
+      "/pricing",
+    );
+  });
+
+  it("titles each limit", () => {
+    render(
+      <MemoryRouter>
+        <UpgradeDialog
+          message="Free includes 3 boards."
+          code="BOARD_LIMIT"
+          onOpenChange={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("dialog", { name: "Upgrade for unlimited boards" })).toBeVisible();
   });
 });
 

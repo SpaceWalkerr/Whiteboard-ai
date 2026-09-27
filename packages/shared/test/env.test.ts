@@ -67,6 +67,13 @@ describe("loadEnv(serverEnvSchema)", () => {
     EMAIL_TRANSPORT: "resend",
     RESEND_API_KEY: "re_0123456789",
     EMAIL_FROM: "Whiteboard <no-reply@example.com>",
+    RAZORPAY_KEY_ID: "rzp_live_0123456789",
+    RAZORPAY_KEY_SECRET: "secret-0123456789",
+    RAZORPAY_WEBHOOK_SECRET: "whsec-0123456789",
+    RAZORPAY_PLAN_PRO_MONTHLY: "plan_pm",
+    RAZORPAY_PLAN_PRO_YEARLY: "plan_py",
+    RAZORPAY_PLAN_TEAM_MONTHLY: "plan_tm",
+    RAZORPAY_PLAN_TEAM_YEARLY: "plan_ty",
   };
 
   it("accepts a complete production environment", () => {
@@ -81,6 +88,11 @@ describe("loadEnv(serverEnvSchema)", () => {
     ["ANTHROPIC_API_KEY", "is required in production"],
     ["RESEND_API_KEY", "is required when EMAIL_TRANSPORT=resend"],
     ["EMAIL_FROM", "is required when EMAIL_TRANSPORT=resend"],
+    ["RAZORPAY_KEY_ID", "is required in production"],
+    ["RAZORPAY_KEY_SECRET", "is required in production"],
+    ["RAZORPAY_WEBHOOK_SECRET", "is required in production"],
+    ["RAZORPAY_PLAN_PRO_MONTHLY", "is required in production"],
+    ["RAZORPAY_PLAN_TEAM_YEARLY", "is required in production"],
   ])("requires %s in production", (variable, problem) => {
     const error = captureError(() =>
       loadEnv(serverEnvSchema, { ...productionEnv, [variable]: "" }),
@@ -96,6 +108,29 @@ describe("loadEnv(serverEnvSchema)", () => {
     expect(loadEnv(serverEnvSchema, { ...validServerEnv, AI_ENABLED: "false" }).AI_ENABLED).toBe(
       false,
     );
+  });
+
+  it("refuses Razorpay test keys in production", () => {
+    const error = captureError(() =>
+      loadEnv(serverEnvSchema, { ...productionEnv, RAZORPAY_KEY_ID: "rzp_test_0123456789" }),
+    );
+    expect(error.issues).toEqual([
+      { variable: "RAZORPAY_KEY_ID", problem: "must be a live key in production" },
+    ]);
+  });
+
+  it("requires every Razorpay setting once a key id is set in development", () => {
+    const error = captureError(() =>
+      loadEnv(serverEnvSchema, { ...validServerEnv, RAZORPAY_KEY_ID: "rzp_test_0123456789" }),
+    );
+    expect(error.issues.map((issue) => issue.variable)).toEqual([
+      "RAZORPAY_KEY_SECRET",
+      "RAZORPAY_WEBHOOK_SECRET",
+      "RAZORPAY_PLAN_PRO_MONTHLY",
+      "RAZORPAY_PLAN_PRO_YEARLY",
+      "RAZORPAY_PLAN_TEAM_MONTHLY",
+      "RAZORPAY_PLAN_TEAM_YEARLY",
+    ]);
   });
 
   it("refuses the log email transport in production", () => {

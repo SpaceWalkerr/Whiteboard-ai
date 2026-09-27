@@ -32,12 +32,7 @@ import {
   type AiCallStatus,
 } from "@whiteboard/shared/db";
 import { graphSize, loadDesign } from "../ai/boardGraph";
-import {
-  getEntitlement,
-  quotaResetsAt,
-  reserveReview,
-  reviewsUsedThisMonth,
-} from "../ai/entitlements";
+import { getEntitlement, quotaResetsAt, reserveReview, reviewsUsed } from "../ai/entitlements";
 import type { LanguageModel } from "../ai/model";
 import { runHints, runReview, type CallOutcome } from "../ai/reviewer";
 import { recordUsage, spendTodayMicros } from "../ai/usage";
@@ -47,14 +42,15 @@ import {
   ForbiddenError,
   NotFoundError,
   PayloadTooLargeError,
-  PaymentRequiredError,
   ServiceUnavailableError,
   TooManyRequestsError,
   UnprocessableError,
 } from "../errors";
 import { authorize, refuseIfPrivate, shareTokenOf } from "./boards";
 import { activeInterviewContext } from "./interviews";
-import type { AiConfig, ApiDeps } from "./deps";
+import { nowOf, type AiConfig, type ApiDeps } from "./deps";
+import { checkFeature } from "@whiteboard/shared/entitlements";
+import { throwIfBlocked } from "../billing/limits";
 import { parse } from "./validation";
 
 const idParams = z.object({ id: z.uuid() });
@@ -251,10 +247,8 @@ function openEventStream(reply: FastifyReply) {
 export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void {
   app.get("/me/ai-quota", async (request): Promise<AiQuota> => {
     const user = requireUser(request);
-    const [entitlement, used] = await Promise.all([
-      getEntitlement(deps.db, user.id),
-      reviewsUsedThisMonth(deps.db, user.id),
-    ]);
+    const entitlement = await getEntitlement(deps.db, user.id, nowOf(deps));
+    const used = await reviewsUsed(deps.db, user.id, entitlement);
     const ai = deps.ai;
     const available =
       ai?.model !== undefined && ai.enabled && !(await isSpendLimitReached(deps, ai));
@@ -263,7 +257,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       reviewsUsed: used,
       reviewsLimit: entitlement.reviewsPerMonth,
       resetsAt: quotaResetsAt().toISOString(),
-      liveHints: entitlement.liveHints,
+      liveHints: entitlement.limits.liveHints,
       available,
     };
   });
@@ -364,17 +358,21 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
         );
 
       // Not stored: the row is only a quota reservation, with no content, deleted at the end.
-      const reviewId = await reserveReview(deps.db, {
-        boardId: id,
-        userId: user.id,
-        problemStatement: store ? body.problemStatement : "",
-        requirements: store ? body.requirements : "",
-        graph: store ? design.graph : null,
-        graphFormatVersion: GRAPH_FORMAT_VERSION,
-        ruleFindings: store ? design.findings : [],
-        model: ai.review.model,
-        interviewId: interview?.interviewId ?? null,
-      });
+      const reviewId = await reserveReview(
+        deps.db,
+        {
+          boardId: id,
+          userId: user.id,
+          problemStatement: store ? body.problemStatement : "",
+          requirements: store ? body.requirements : "",
+          graph: store ? design.graph : null,
+          graphFormatVersion: GRAPH_FORMAT_VERSION,
+          ruleFindings: store ? design.findings : [],
+          model: ai.review.model,
+          interviewId: interview?.interviewId ?? null,
+        },
+        nowOf(deps),
+      );
       const log = request.log.child({ reviewId, boardId: id });
 
       const stream = openEventStream(reply);
@@ -507,12 +505,9 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
       );
       // No AI help while an interview is running on this board.
       if (await activeInterviewContext(deps, id, user.id)) return { hints: [], skipped: true };
-      const entitlement = await getEntitlement(deps.db, user.id);
-      if (!entitlement.liveHints)
-        throw new PaymentRequiredError(
-          "PLAN_REQUIRED",
-          "Live AI hints are included in the Pro and Team plans.",
-        );
+      throwIfBlocked(
+        checkFeature(await getEntitlement(deps.db, user.id, nowOf(deps)), "liveHints"),
+      );
       const { ai, llm } = await requireAi(deps);
       if (!deps.boardStore)
         throw new ServiceUnavailableError("AI_UNAVAILABLE", "AI hints aren't available right now.");

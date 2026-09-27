@@ -3,13 +3,26 @@ import { boards, eq, lt, sql } from "@whiteboard/shared/db";
 import { audit } from "../audit/audit";
 import { UnauthorizedError } from "../errors";
 import { TRASH_RETENTION_DAYS } from "./boards";
-import type { ApiDeps } from "./deps";
+import { runBillingSweep } from "../billing/service";
+import { billingContext, type ApiDeps } from "./deps";
 
 /**
  * Internal endpoints for scheduled jobs (Render Cron Jobs). They live outside the user API
  * scope: they are authenticated by CRON_SECRET, never by a user session.
  */
 export function registerInternalRoutes(app: FastifyInstance, deps: ApiDeps): void {
+  /**
+   * Billing housekeeping (Render Cron, every 15 minutes): re-fetches subscriptions whose
+   * webhooks may have been missed, sends grace-period reminders, and enforces limits +
+   * sends the "downgraded" email for plans that ended. Idempotent.
+   */
+  app.post("/internal/billing-sweep", async (request) => {
+    if (!deps.cronSecret || request.headers.authorization !== `Bearer ${deps.cronSecret}`) {
+      throw new UnauthorizedError("A valid cron secret is required.");
+    }
+    return runBillingSweep(billingContext(deps));
+  });
+
   /**
    * Hard-deletes boards that have been in the trash for more than 30 days (content, history
    * and thumbnail). Called by a Render Cron Job with the CRON_SECRET bearer token.

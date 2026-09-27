@@ -1,3 +1,5 @@
+import type { LimitCode } from "@whiteboard/shared/entitlements";
+
 /**
  * Base class for errors whose message is safe to show to API clients. Anything that is not
  * an AppError is treated as unexpected: logged in full, returned as a generic 500.
@@ -60,7 +62,7 @@ export interface ErrorBody {
 
 /** The caller's plan doesn't include this, or its allowance is used up (upgrade prompt). */
 export class PaymentRequiredError extends AppError {
-  constructor(code: "QUOTA_EXCEEDED" | "PLAN_REQUIRED", message: string) {
+  constructor(code: LimitCode, message: string) {
     super(402, code, message);
   }
 }

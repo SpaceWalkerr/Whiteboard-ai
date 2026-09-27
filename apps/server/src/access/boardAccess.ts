@@ -3,6 +3,7 @@ import type { BoardRole } from "@whiteboard/shared/api";
 import type { InterviewRole, InterviewStatus } from "@whiteboard/shared/interview";
 import {
   and,
+  boardEditorSeats,
   boardMembers,
   boards,
   eq,
@@ -61,11 +62,16 @@ export interface BoardAccess {
    * or were the candidate of an interview that has ended (the board is their submitted answer).
    */
   interviewCapped: boolean;
+  ownerId: string | null;
+  /** Above the owner's plan's board limit: nobody may edit it (Phase 10). */
+  locked: boolean;
+  /** The caller's editor seat on this board (see billing/limits.ts). */
+  editorSeat: "active" | "suspended" | null;
 }
 
 /**
  * Effective role of a caller on a board: the highest of direct membership, workspace role
- * (workspace owner/admin act as board owner), a valid share link (signed-in callers only) and
+ * (workspace owner/admin act as board owner, team members as editors), a valid share link (signed-in callers only) and
  * public read-only access. Returns null if the board does not exist.
  */
 export async function resolveBoardAccess(
@@ -95,6 +101,9 @@ export async function resolveBoardAccess(
       encryptedTitle: boards.encryptedTitle,
       keyCheck: boards.keyCheck,
       deletedAt: boards.deletedAt,
+      ownerId: boards.ownerId,
+      planLockedAt: boards.planLockedAt,
+      seatSuspended: boardEditorSeats.suspended,
       memberRole: boardMembers.role,
       orgRole: memberships.role,
       linkId: shareLinks.id,
@@ -107,6 +116,12 @@ export async function resolveBoardAccess(
       userId === null
         ? sql`false`
         : and(eq(boardMembers.boardId, boards.id), eq(boardMembers.userId, userId)),
+    )
+    .leftJoin(
+      boardEditorSeats,
+      userId === null
+        ? sql`false`
+        : and(eq(boardEditorSeats.boardId, boards.id), eq(boardEditorSeats.userId, userId)),
     )
     .leftJoin(
       memberships,
@@ -141,6 +156,9 @@ export async function resolveBoardAccess(
     via: null,
     linkId: null,
     interviewCapped: row.interviewCapped,
+    ownerId: row.ownerId,
+    locked: row.planLockedAt !== null,
+    editorSeat: row.seatSuspended === null ? null : row.seatSuspended ? "suspended" : "active",
   };
   const offer = (
     role: BoardRole | null,
@@ -156,6 +174,8 @@ export async function resolveBoardAccess(
 
   offer(row.memberRole, "member");
   if (row.orgRole === "owner" || row.orgRole === "admin") offer("owner", "org");
+  // Team workspaces: every member may edit the team's boards (subject to editor seats).
+  if (row.orgRole === "member") offer("editor", "org");
   if (row.linkId !== null) offer(row.linkRole, "link", row.linkId);
   if (row.isPublic) offer("viewer", "public");
   if (access.interviewCapped && access.role !== null) access.role = "viewer";

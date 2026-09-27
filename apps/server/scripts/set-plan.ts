@@ -7,6 +7,7 @@
 import { PLANS, type Plan } from "@whiteboard/shared/plans";
 import { createDb, entitlements, profiles, eq } from "@whiteboard/shared/db";
 import { audit } from "../src/audit/audit";
+import { enforceOwnerLimits } from "../src/billing/limits";
 
 async function main(): Promise<void> {
   const [email, plan, override] = process.argv.slice(2);
@@ -39,13 +40,16 @@ async function main(): Promise<void> {
           aiReviewsPerMonthOverride: reviewsOverride,
         })
         .onConflictDoUpdate({
-          target: entitlements.userId,
+          // The "manual" grant; billing's own grants (subscriptions, trials) are untouched.
+          target: [entitlements.userId, entitlements.source, entitlements.sourceId],
           set: {
             plan: plan as Plan,
             aiReviewsPerMonthOverride: reviewsOverride,
             updatedAt: new Date(),
           },
         });
+      // Lock boards above a lower plan's limit (or unlock them), like billing does.
+      await enforceOwnerLimits(tx, profile.id, new Date());
       await audit(tx, {
         action: "entitlement.change",
         actorId: null,

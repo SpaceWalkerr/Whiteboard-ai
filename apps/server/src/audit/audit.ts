@@ -21,7 +21,16 @@ export type AuditAction =
   | "interview.end"
   | "interview.scorecard_submit"
   | "interview_link.create"
-  | "interview_link.revoke";
+  | "interview_link.revoke"
+  | "billing.checkout"
+  | "billing.subscription_sync"
+  | "billing.cancel"
+  | "billing.change_plan"
+  | "billing.student_trial"
+  | "billing.downgrade"
+  | "team.member_add"
+  | "team.member_remove"
+  | "editor_seat.release";
 
 export interface AuditEntry {
   action: AuditAction;
@@ -29,7 +38,16 @@ export interface AuditEntry {
   orgId?: string | null;
   boardId?: string | null;
   targetType:
-    "board" | "member" | "invite" | "share_link" | "entitlement" | "interview" | "interview_link";
+    | "board"
+    | "member"
+    | "invite"
+    | "share_link"
+    | "entitlement"
+    | "interview"
+    | "interview_link"
+    | "subscription"
+    | "team"
+    | "editor_seat";
   targetId?: string | null;
   metadata?: Record<string, unknown>;
   ip?: string | null;
@@ -38,7 +56,7 @@ export interface AuditEntry {
 type Executor = Pick<Database, "insert">;
 
 /**
- * Records a share, permission or deletion action. Call it with the same transaction as the
+ * Records a share, permission, deletion or money action. Call it with the same transaction as the
  * change itself, so the log can never miss an action (or record one that rolled back).
  */
 export async function audit(tx: Executor, entry: AuditEntry): Promise<void> {

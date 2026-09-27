@@ -7,7 +7,8 @@ import { AppError, BadRequestError } from "../errors";
 import { buildSnapshot } from "../sync/roomPersistence";
 import { thumbnailPath } from "../storage/thumbnails";
 import { authorize, boardDetail, refuseIfPrivate, shareTokenOf } from "./boards";
-import type { ApiDeps } from "./deps";
+import { assertBoardSlot } from "../billing/limits";
+import { nowOf, type ApiDeps } from "./deps";
 import { parse } from "./validation";
 import { ensureWorkspace } from "./workspace";
 
@@ -50,6 +51,7 @@ export function registerBoardExtraRoutes(app: FastifyInstance, deps: ApiDeps): v
 
     const copy = await deps.db.transaction(async (tx) => {
       const orgId = await ensureWorkspace(tx, user);
+      await assertBoardSlot(tx, user.id, nowOf(deps));
       const [created] = await tx
         .insert(boards)
         .values({

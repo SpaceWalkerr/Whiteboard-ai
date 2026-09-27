@@ -219,6 +219,7 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
       case "interview":
         return false;
       case "board_deleted":
+      case "plan":
         return true;
       case "member":
         return connection.identity.userId === event.userId;

@@ -15,7 +15,9 @@
     "./api": "./src/api/index.ts",
     "./plans": "./src/plans.ts",
     "./interview": "./src/interview/index.ts",
-    "./replay": "./src/replay/index.ts"
+    "./replay": "./src/replay/index.ts",
+    "./entitlements": "./src/entitlements/index.ts",
+    "./billing": "./src/billing/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings=0",

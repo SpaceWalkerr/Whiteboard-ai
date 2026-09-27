@@ -18,7 +18,9 @@ import {
 } from "drizzle-orm/pg-core";
 import { authUsers } from "drizzle-orm/supabase";
 import { INTERVIEW_ROLES, INTERVIEW_STATUSES } from "../interview";
-import { PLANS } from "../plans";
+import { BILLING_INTERVALS, BILLING_PROVIDERS } from "../billing";
+import { ENTITLEMENT_SOURCES, SUBSCRIPTION_STATUSES } from "../entitlements/derive";
+import { PLANS } from "../entitlements/limits";
 
 /**
  * One row per Supabase Auth user. The id IS the auth user id, so deleting the auth user
@@ -84,6 +86,11 @@ export const boards = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /**
+     * Set while the board is above its owner's plan's board limit (Phase 10): read-only for
+     * everyone, never deleted. Cleared when the owner upgrades or frees a slot.
+     */
+    planLockedAt: timestamp("plan_locked_at", { withTimezone: true }),
   },
   (t) => [
     index("boards_owner_id_idx").on(t.ownerId),
@@ -312,19 +319,47 @@ export type OrgRole = (typeof ORG_ROLES)[number];
 
 export const planEnum = pgEnum("plan", PLANS);
 
+export const entitlementSource = pgEnum("entitlement_source", ENTITLEMENT_SOURCES);
+
 /**
- * What each user may use. A missing row means the Free plan. Billing (Phase 10) will write
- * `plan`; limits per plan live in code (`PLAN_LIMITS`), with an optional per-user override.
+ * Why a user has a plan: one row per grant (Phase 10). Derived from subscriptions, team
+ * seats and student trials by apps/server (never written by hand); `manual` rows come from
+ * the dev-only plan:set script / support. No row = Free. The effective plan is the best grant
+ * whose `valid_until` is still in the future — compared at every check, so a late background
+ * job can never extend paid time.
  */
-export const entitlements = pgTable("entitlements", {
-  userId: uuid("user_id")
-    .primaryKey()
-    .references(() => authUsers.id, { onDelete: "cascade" }),
-  plan: planEnum("plan").notNull().default("free"),
-  /** Replaces the plan's monthly AI review allowance when set (support, trials). */
-  aiReviewsPerMonthOverride: integer("ai_reviews_per_month_override"),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}).enableRLS();
+export const entitlements = pgTable(
+  "entitlements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    plan: planEnum("plan").notNull().default("free"),
+    source: entitlementSource("source").notNull().default("manual"),
+    /** Subscription id, team org id, student trial id or "manual". */
+    sourceId: text("source_id").notNull().default("manual"),
+    /** Team seats: the organization whose seat this is (AI reviews pooled across it). */
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "cascade" }),
+    /** Team seats: the subscription's seat count (the pool size). */
+    seats: integer("seats"),
+    /** Replaces the plan's monthly AI review allowance when set (support, trials). */
+    aiReviewsPerMonthOverride: integer("ai_reviews_per_month_override"),
+    /** The grant stops counting at this instant; null = open-ended. */
+    validUntil: timestamp("valid_until", { withTimezone: true }),
+    /**
+     * The billing sweep has applied this grant's expiry (limits enforced, email sent).
+     * Cleared whenever valid_until changes.
+     */
+    expiryProcessedAt: timestamp("expiry_processed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("entitlements_user_source_idx").on(t.userId, t.source, t.sourceId),
+    index("entitlements_valid_until_idx").on(t.validUntil),
+  ],
+).enableRLS();
 
 export const REVIEW_STATUSES = ["running", "completed", "failed"] as const;
 export const reviewStatus = pgEnum("review_status", REVIEW_STATUSES);
@@ -545,3 +580,185 @@ export const interviewShareLinks = pgTable(
   },
   (t) => [index("interview_share_links_interview_id_idx").on(t.interviewId)],
 ).enableRLS();
+
+// ── Phase 10: billing ───────────────────────────────────────────────────────────────────────
+
+export const billingProvider = pgEnum("billing_provider", BILLING_PROVIDERS);
+export const billingInterval = pgEnum("billing_interval", BILLING_INTERVALS);
+export const subscriptionStatus = pgEnum("subscription_status", SUBSCRIPTION_STATUSES);
+export const INVOICE_STATUSES = ["paid", "issued", "failed", "cancelled"] as const;
+export const invoiceStatus = pgEnum("invoice_status", INVOICE_STATUSES);
+
+/**
+ * The price list (seeded by migration). Provider-side plan ids differ per environment (test
+ * vs live mode), so they are server configuration, not rows.
+ */
+export const plans = pgTable("plans", {
+  id: text("id").primaryKey(),
+  tier: planEnum("tier").notNull(),
+  interval: billingInterval("interval").notNull(),
+  currency: text("currency").notNull(),
+  /** Minor units (paise); per seat for Team. */
+  amountMinor: integer("amount_minor").notNull(),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}).enableRLS();
+
+/**
+ * Our copy of a provider subscription. Always overwritten with the provider's current state
+ * (fetched, never taken from a webhook body), so event order doesn't matter. Belongs to an
+ * organization: Pro → the purchaser's personal workspace, Team → a team workspace. No
+ * cascading deletes: billing records outlive workspaces.
+ */
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "set null" }),
+    /** Who bought it (manages it; receives billing emails). */
+    userId: uuid("user_id").references(() => authUsers.id, { onDelete: "set null" }),
+    provider: billingProvider("provider").notNull(),
+    providerSubscriptionId: text("provider_subscription_id").notNull(),
+    providerCustomerId: text("provider_customer_id"),
+    planId: text("plan_id")
+      .notNull()
+      .references(() => plans.id),
+    status: subscriptionStatus("status").notNull(),
+    /** Seats (Team); 1 for Pro. */
+    quantity: integer("quantity").notNull().default(1),
+    currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    nextChargeAt: timestamp("next_charge_at", { withTimezone: true }),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    /** Set at the first failed payment; the plan is kept until then (7 days). */
+    graceUntil: timestamp("grace_until", { withTimezone: true }),
+    graceReminderSentAt: timestamp("grace_reminder_sent_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    hasScheduledChange: boolean("has_scheduled_change").notNull().default(false),
+    couponCode: text("coupon_code"),
+    /** The coupon's redemption was counted (exactly once, at the first activation). */
+    couponRedeemedAt: timestamp("coupon_redeemed_at", { withTimezone: true }),
+    syncedAt: timestamp("synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("subscriptions_provider_id_idx").on(t.provider, t.providerSubscriptionId),
+    index("subscriptions_org_id_idx").on(t.orgId),
+    index("subscriptions_user_id_idx").on(t.userId),
+    // One paid subscription per workspace: a second checkout must be a plan change instead.
+    uniqueIndex("subscriptions_one_live_per_org")
+      .on(t.orgId)
+      .where(sql`${t.status} in ('authenticated', 'active', 'past_due', 'halted')`),
+  ],
+).enableRLS();
+
+/**
+ * Every webhook delivery we accepted, keyed by the provider's event id. Inserted first, in
+ * the same transaction as its effects: a redelivered event conflicts and changes nothing.
+ * Ids and type only — no customer data from the payload.
+ */
+export const billingEvents = pgTable(
+  "billing_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: billingProvider("provider").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    providerSubscriptionId: text("provider_subscription_id"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("billing_events_provider_event_idx").on(t.provider, t.providerEventId)],
+).enableRLS();
+
+export const invoices = pgTable(
+  "invoices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriptionId: uuid("subscription_id").references(() => subscriptions.id, {
+      onDelete: "set null",
+    }),
+    /** Copied from the subscription so invoices stay listable if it goes away. */
+    orgId: uuid("org_id"),
+    userId: uuid("user_id"),
+    provider: billingProvider("provider").notNull(),
+    providerInvoiceId: text("provider_invoice_id").notNull(),
+    providerPaymentId: text("provider_payment_id"),
+    status: invoiceStatus("status").notNull(),
+    amountMinor: integer("amount_minor").notNull(),
+    currency: text("currency").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }),
+    periodEnd: timestamp("period_end", { withTimezone: true }),
+    issuedAt: timestamp("issued_at", { withTimezone: true }),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    receiptUrl: text("receipt_url"),
+    /** The receipt email was handed to the mailer (at most once). */
+    receiptSentAt: timestamp("receipt_sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("invoices_provider_invoice_idx").on(t.provider, t.providerInvoiceId),
+    index("invoices_subscription_id_idx").on(t.subscriptionId),
+    index("invoices_org_id_idx").on(t.orgId, t.issuedAt),
+  ],
+).enableRLS();
+
+/** Discount codes, each mapped to a provider offer (created in the provider's dashboard). */
+export const coupons = pgTable("coupons", {
+  /** Upper-case. */
+  code: text("code").primaryKey(),
+  provider: billingProvider("provider").notNull(),
+  providerOfferId: text("provider_offer_id").notNull(),
+  description: text("description").notNull(),
+  /** Catalog plan ids it applies to; null = all. */
+  planIds: text("plan_ids").array(),
+  validFrom: timestamp("valid_from", { withTimezone: true }),
+  validUntil: timestamp("valid_until", { withTimezone: true }),
+  maxRedemptions: integer("max_redemptions"),
+  redemptions: integer("redemptions").notNull().default(0),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}).enableRLS();
+
+/**
+ * Student offers (Pro for 3 months). One per user and one per email address ever: the hash
+ * stays when the account is deleted, so re-creating it can't restart the trial.
+ */
+export const studentTrials = pgTable("student_trials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .unique()
+    .references(() => authUsers.id, { onDelete: "set null" }),
+  /** SHA-256 of the lower-cased email. */
+  emailHash: text("email_hash").notNull().unique(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+}).enableRLS();
+
+/**
+ * Who may edit a board beyond its owner: a seat is claimed the first time someone connects
+ * (or writes) with edit access. The owner's plan caps the seats; seats above the cap are
+ * suspended (read-only), in claim order, and come back when the owner upgrades.
+ */
+export const boardEditorSeats = pgTable(
+  "board_editor_seats",
+  {
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    suspended: boolean("suspended").notNull().default(false),
+  },
+  (t) => [
+    primaryKey({ columns: [t.boardId, t.userId] }),
+    index("board_editor_seats_user_id_idx").on(t.userId),
+  ],
+).enableRLS();
+
+export type SubscriptionRow = typeof subscriptions.$inferSelect;
+export type InvoiceRow = typeof invoices.$inferSelect;
+export type EntitlementRow = typeof entitlements.$inferSelect;

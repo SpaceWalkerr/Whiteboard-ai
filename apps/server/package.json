@@ -12,7 +12,8 @@
     "test": "vitest run",
     "load:seed": "tsx --env-file-if-exists=.env scripts/loadtest-seed.ts",
     "plan:set": "tsx --env-file-if-exists=.env scripts/set-plan.ts",
-    "eval:review": "tsx --env-file-if-exists=.env eval/run.ts"
+    "eval:review": "tsx --env-file-if-exists=.env eval/run.ts",
+    "billing:expire": "tsx --env-file-if-exists=.env scripts/billing-expire.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.128.0",

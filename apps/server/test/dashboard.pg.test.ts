@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import {
   auditLogs,
   boards,
+  entitlements,
   eq,
   sql as dsql,
   type Database,
@@ -66,6 +67,8 @@ beforeAll(async () => {
   bob = await createAuthUser(sql, "Bob");
   token.alice = await auth.sign(alice);
   token.bob = await auth.sign(bob);
+  // These tests create more boards than Free allows (3); plan limits have their own suite.
+  await db.insert(entitlements).values({ userId: alice.id, plan: "pro" });
 });
 
 afterAll(async () => {

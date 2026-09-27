@@ -12,6 +12,7 @@ import {
 } from "@whiteboard/shared/api";
 import {
   and,
+  boardEditorSeats,
   boardMembers,
   boards,
   eq,
@@ -26,7 +27,8 @@ import { requireUser } from "../auth/requestAuth";
 import { inviteEmail } from "../email/InviteEmail";
 import { AppError, BadRequestError, ConflictError, ForbiddenError, NotFoundError } from "../errors";
 import { authorize, refuseIfPrivate } from "./boards";
-import type { ApiDeps } from "./deps";
+import { assertEditorSeatAvailable } from "../billing/limits";
+import { nowOf, type ApiDeps } from "./deps";
 import { addMember } from "./me";
 import { newSecretToken } from "./tokens";
 import { parse } from "./validation";
@@ -151,6 +153,8 @@ export function registerSharingRoutes(app: FastifyInstance, deps: ApiDeps): void
         .where(and(eq(boardMembers.boardId, id), eq(profiles.email, body.email)));
       if (existingMember)
         throw new ConflictError("That person is already a member. Change their role instead.");
+      if (body.role === "editor" && access.ownerId)
+        await assertEditorSeatAvailable(deps.db, id, access.ownerId, null, nowOf(deps));
 
       const token = newSecretToken();
       const invite = await deps.db.transaction(async (tx) => {
@@ -248,6 +252,13 @@ export function registerSharingRoutes(app: FastifyInstance, deps: ApiDeps): void
       if (!member) throw new NotFoundError("Member not found");
       if (member.role === "owner") throw new ForbiddenError("The owner's role can't be changed.");
       if (member.role === role) return;
+      if (role === "editor" && access.ownerId)
+        await assertEditorSeatAvailable(tx, id, access.ownerId, userId, nowOf(deps));
+      // A viewer doesn't need an editor seat: free it for someone else.
+      if (role === "viewer")
+        await tx
+          .delete(boardEditorSeats)
+          .where(and(eq(boardEditorSeats.boardId, id), eq(boardEditorSeats.userId, userId)));
       await tx
         .update(boardMembers)
         .set({ role })
@@ -282,6 +293,9 @@ export function registerSharingRoutes(app: FastifyInstance, deps: ApiDeps): void
       await tx
         .delete(boardMembers)
         .where(and(eq(boardMembers.boardId, id), eq(boardMembers.userId, userId)));
+      await tx
+        .delete(boardEditorSeats)
+        .where(and(eq(boardEditorSeats.boardId, id), eq(boardEditorSeats.userId, userId)));
       await audit(tx, {
         action: "member.remove",
         actorId: user.id,

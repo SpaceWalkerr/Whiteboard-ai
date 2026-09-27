@@ -9,6 +9,7 @@ import type { Mailer } from "../email/mailer";
 import type { BoardRepository } from "../persistence/repository";
 import type { RevocationBus } from "../revocation/bus";
 import type { ThumbnailStorage } from "../storage/thumbnails";
+import type { BillingConfig, BillingContext } from "../billing/context";
 
 export interface ApiDeps {
   db: Database;
@@ -29,6 +30,26 @@ export interface ApiDeps {
   cronSecret?: string | undefined;
   /** AI reviews and hints; absent (or without a model) = AI routes answer 503. */
   ai?: AiConfig | undefined;
+  /** Payments; absent = checkout unavailable (plans can still come from grants). */
+  billing?: BillingConfig | undefined;
+  /** The clock for plan expiry decisions (tests move it; production uses the real time). */
+  now?: (() => Date) | undefined;
+}
+
+export function nowOf(deps: Pick<ApiDeps, "now">): Date {
+  return deps.now ? deps.now() : new Date();
+}
+
+export function billingContext(deps: ApiDeps): BillingContext {
+  return {
+    db: deps.db,
+    mailer: deps.mailer,
+    revocations: deps.revocations,
+    logger: deps.logger,
+    appUrl: deps.appUrl,
+    now: () => nowOf(deps),
+    billing: deps.billing,
+  };
 }
 
 export interface AiConfig {

@@ -1,53 +1,50 @@
-import { PLAN_LIMITS, PLAN_NAMES, type Plan } from "@whiteboard/shared/plans";
-import { aiUsage, entitlements, eq, reviews, sql, type Database } from "@whiteboard/shared/db";
+import { checkAiReview, type Entitlement } from "@whiteboard/shared/entitlements";
+import { aiUsage, entitlements, reviews, sql, type Database } from "@whiteboard/shared/db";
 import type { Tx } from "../api/deps";
-import { PaymentRequiredError } from "../errors";
+import { loadEntitlement } from "../billing/entitlements";
+import { throwIfBlocked } from "../billing/limits";
 
-export interface Entitlement {
-  plan: Plan;
-  reviewsPerMonth: number;
-  liveHints: boolean;
-  interviewMode: boolean;
-  privateRooms: boolean;
+export type { Entitlement };
+
+/** The user's plan and limits right now (see billing/entitlements.ts). */
+export async function getEntitlement(
+  db: Database | Tx,
+  userId: string,
+  now: Date = new Date(),
+): Promise<Entitlement> {
+  return loadEntitlement(db, userId, now);
 }
 
 /** A reservation older than this is treated as crashed and stops holding quota. */
 const RUNNING_RESERVATION_MINUTES = 10;
 
-/** The user's plan and limits; users without a row are on Free. */
-export async function getEntitlement(db: Database | Tx, userId: string): Promise<Entitlement> {
-  const [row] = await db
-    .select({ plan: entitlements.plan, override: entitlements.aiReviewsPerMonthOverride })
-    .from(entitlements)
-    .where(eq(entitlements.userId, userId));
-  const plan = row?.plan ?? "free";
-  const limits = PLAN_LIMITS[plan];
-  return {
-    plan,
-    reviewsPerMonth: row?.override ?? limits.aiReviewsPerMonth,
-    liveHints: limits.liveHints,
-    interviewMode: limits.interviewMode,
-    privateRooms: limits.privateRooms,
-  };
-}
-
 /**
  * Reviews that count against this calendar month's (UTC) allowance: completed reviews and
  * reviews the user aborted after Claude started (both recorded in ai_usage, which outlives
  * deleted boards), plus reviews running right now (reservations). Failures on our side —
- * model errors, refusals, truncated or invalid output — are free.
+ * model errors, refusals, truncated or invalid output — are free. A Team seat counts the
+ * whole team's reviews (the allowance is pooled across its seats).
  */
-export async function reviewsUsedThisMonth(db: Database | Tx, userId: string): Promise<number> {
+export async function reviewsUsed(
+  db: Database | Tx,
+  userId: string,
+  entitlement: Entitlement,
+): Promise<number> {
+  const users = entitlement.pool
+    ? sql`(select ${entitlements.userId} from ${entitlements}
+          where ${entitlements.source} = 'team_seat' and ${entitlements.orgId} = ${entitlement.pool.orgId}
+            and (${entitlements.validUntil} is null or ${entitlements.validUntil} > now()))`
+    : sql`(select ${userId}::uuid)`;
   const rows = await db.execute<{ used: string | number }>(sql`
     select
       (select count(*) from ${aiUsage}
-        where ${aiUsage.userId} = ${userId}
+        where ${aiUsage.userId} in ${users}
           and ${aiUsage.kind} = 'review'
           and ${aiUsage.status} in ('ok', 'aborted')
           and ${aiUsage.createdAt} >= date_trunc('month', now(), 'UTC'))
       +
       (select count(*) from ${reviews}
-        where ${reviews.requestedBy} = ${userId}
+        where ${reviews.requestedBy} in ${users}
           and ${reviews.status} = 'running'
           and ${reviews.createdAt} > now() - make_interval(mins => ${RUNNING_RESERVATION_MINUTES}))
       as used`);
@@ -78,19 +75,20 @@ export interface NewReview {
  * user with an advisory lock, so two parallel requests can't both take the last review.
  * Throws PaymentRequiredError (402) when the allowance is used up; nothing is reserved.
  */
-export async function reserveReview(db: Database, review: NewReview): Promise<string> {
+export async function reserveReview(
+  db: Database,
+  review: NewReview,
+  now: Date = new Date(),
+): Promise<string> {
   return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`ai-review-quota:${review.userId}`}, 0))`,
-    );
-    const entitlement = await getEntitlement(tx, review.userId);
-    const used = await reviewsUsedThisMonth(tx, review.userId);
-    if (used >= entitlement.reviewsPerMonth) {
-      throw new PaymentRequiredError(
-        "QUOTA_EXCEEDED",
-        `You've used all ${String(entitlement.reviewsPerMonth)} AI reviews included in the ${PLAN_NAMES[entitlement.plan]} plan this month.`,
-      );
-    }
+    const entitlement = await getEntitlement(tx, review.userId, now);
+    // Per user, or per team when the allowance is pooled: two teammates can't both take
+    // the team's last review.
+    const key = entitlement.pool
+      ? `ai-review-quota:org:${entitlement.pool.orgId}`
+      : `ai-review-quota:${review.userId}`;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+    throwIfBlocked(checkAiReview(entitlement, await reviewsUsed(tx, review.userId, entitlement)));
     const [row] = await tx
       .insert(reviews)
       .values({

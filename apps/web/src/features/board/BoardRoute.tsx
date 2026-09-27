@@ -67,7 +67,7 @@ export function BoardRoute({ env }: { env: WebEnv }) {
         body: shareToken ? { shareToken } : {},
         schema: ticketResponseSchema,
       });
-      return { ok: true, ticket: ticket.ticket, role: ticket.role };
+      return { ok: true, ticket: ticket.ticket, role: ticket.role, limitedBy: ticket.limitedBy };
     } catch (error) {
       if (error instanceof ApiRequestError) {
         if (error.status === 401) return { ok: false, reason: "unauthorized" };

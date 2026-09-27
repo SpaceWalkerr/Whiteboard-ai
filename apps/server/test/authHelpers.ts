@@ -130,7 +130,7 @@ export interface ApiServer {
 export async function startApiServer(
   db: Database,
   verifier: ApiDeps["verifier"],
-  extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai"> & {
+  extras: Pick<ApiDeps, "thumbnails" | "cronSecret" | "ai" | "billing" | "now"> & {
     /** Share events with other instances (e.g. a RedisRevocationBus); local by default. */
     revocations?: LocalRevocationBus;
     /** Compact (or, for private boards, ask a client for a snapshot) after this many updates. */
@@ -157,7 +157,7 @@ export async function startApiServer(
   });
   const sync = attachSyncServer(app.server, {
     isAllowedOrigin: (origin) => origin === ORIGIN,
-    authorize: ticketAuthorizer(tickets, db),
+    authorize: ticketAuthorizer(tickets, db, apiExtras.now),
     logger: silentLogger,
     metrics,
     roomGraceMs: 50,

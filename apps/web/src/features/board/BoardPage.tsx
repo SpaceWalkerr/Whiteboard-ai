@@ -1,3 +1,5 @@
+import type { BoardLimitReason } from "@whiteboard/shared/billing";
+import { BOARD_LOCKED_MESSAGE } from "@whiteboard/shared/entitlements";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardCheck, Sparkles, UserCheck, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -156,8 +158,16 @@ function createSession(
 /** The caller's current role; can change mid-session (e.g. downgraded to viewer). */
 class RoleStore {
   private readonly listeners = new Set<() => void>();
+  /** Why a plan limit makes me read-only (null = my role decides). */
+  private limit: BoardLimitReason | null = null;
   constructor(private role: BoardRole) {}
   get = (): BoardRole => this.role;
+  getLimit = (): BoardLimitReason | null => this.limit;
+  setLimit(limit: BoardLimitReason | null): void {
+    if (limit === this.limit) return;
+    this.limit = limit;
+    for (const listener of this.listeners) listener();
+  }
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -169,8 +179,15 @@ class RoleStore {
   }
 }
 
+/** Shown when a plan limit (not my role) makes me read-only. */
+const LIMIT_TEXT: Record<BoardLimitReason, string> = {
+  BOARD_LOCKED: BOARD_LOCKED_MESSAGE,
+  EDITOR_LIMIT:
+    "This board's owner has used every editor seat their plan includes, so you can view but not edit. The owner can upgrade or free a seat in the share dialog.",
+};
+
 export type TicketFetchResult =
-  | { ok: true; ticket: string; role: BoardRole }
+  | { ok: true; ticket: string; role: BoardRole; limitedBy: BoardLimitReason | null }
   | { ok: false; reason: Exclude<DeniedReason, "bad_key"> | "error" };
 
 interface BoardPageProps {
@@ -229,6 +246,7 @@ export function BoardPage({
     // A new ticket may carry a different role (e.g. after being downgraded).
     session.controller.setReadOnly(result.role === "viewer");
     session.role.set(result.role);
+    session.role.setLimit(result.limitedBy);
     return { ok: true, ticket: result.ticket };
   }, [fetchTicket, session]);
 
@@ -304,6 +322,7 @@ function BoardView({
   const status = useSyncExternalStore(session.status.subscribe, session.status.get);
   const role = useSyncExternalStore(session.role.subscribe, session.role.get);
   const readOnly = role === "viewer";
+  const limitedBy = useSyncExternalStore(session.role.subscribe, session.role.getLimit);
   const [shareOpen, setShareOpen] = useState(false);
   const peers = useSyncExternalStore(session.peers.subscribe, session.peers.get);
   const [followingClientId, setFollowingClientId] = useState<number | null>(null);
@@ -330,6 +349,7 @@ function BoardView({
   const quota = useAiQuota(signedIn);
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
+  const [limitPrompt, setLimitPrompt] = useState<BoardLimitReason | null>(null);
   const [hintsWanted, setHintsWanted] = useState(readHintsPreference);
   const interview = useSyncExternalStore(session.interview.subscribe, session.interview.get);
   const interviewActive = interview.state?.status === "active";
@@ -617,10 +637,23 @@ function BoardView({
           </Link>
           <BoardTitle title={title} editable={!readOnly} onChange={onTitleChange} />
           {privateBoard && <PrivateBadge />}
-          {readOnly && (
+          {readOnly && limitedBy === null && (
             <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
               View only
             </span>
+          )}
+          {limitedBy !== null && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setLimitPrompt(limitedBy);
+              }}
+            >
+              {limitedBy === "BOARD_LOCKED"
+                ? "Read-only: over plan limit"
+                : "Read-only: editor limit"}
+            </Button>
           )}
           {/* Here rather than in the right-hand bar, which must stay clear of the toolbar. */}
           {/* Interviews need the server to read the board (replay, summary): the badge's
@@ -821,6 +854,13 @@ function BoardView({
           onUpgrade={(message) => {
             setReviewDialogOpen(false);
             setUpgradeMessage(message);
+          }}
+        />
+        <UpgradeDialog
+          message={limitPrompt === null ? null : LIMIT_TEXT[limitPrompt]}
+          code={limitPrompt ?? "BOARD_LOCKED"}
+          onOpenChange={(open) => {
+            if (!open) setLimitPrompt(null);
           }}
         />
         <UpgradeDialog

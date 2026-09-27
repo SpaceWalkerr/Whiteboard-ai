@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Copy,
+  CreditCard,
   Folder,
   FolderPlus,
   LayoutGrid,
@@ -48,12 +49,16 @@ import {
 import { withKey } from "@/features/board/e2e/roomKey";
 import { UpgradeDialog } from "@/features/board/ui/UpgradeDialog";
 import { ApiRequestError } from "@/lib/apiClient";
+import { limitCodeSchema } from "@whiteboard/shared/billing";
+import type { LimitCode } from "@whiteboard/shared/entitlements";
+import { useBillingSummary } from "@/features/billing/api";
 import { cn } from "@/lib/utils";
 
-type View = "mine" | "shared" | "recent" | "trash";
+type View = "mine" | "shared" | "team" | "recent" | "trash";
 const VIEWS: { id: View; label: string }[] = [
   { id: "mine", label: "My boards" },
   { id: "shared", label: "Shared with me" },
+  { id: "team", label: "Team boards" },
   { id: "recent", label: "Recent" },
   { id: "trash", label: "Trash" },
 ];
@@ -112,21 +117,30 @@ export function DashboardPage() {
   const onError = (e: unknown) => {
     setError(errorText(e));
   };
+  const [upgrade, setUpgrade] = useState<{ message: string; code: LimitCode } | null>(null);
+  // Plan limits (402) get the upgrade prompt instead of an error line.
+  const onLimitOrError = (e: unknown) => {
+    if (e instanceof ApiRequestError && e.status === 402) {
+      const code = limitCodeSchema.safeParse(e.code);
+      setUpgrade({ message: e.message, code: code.success ? code.data : "PLAN_REQUIRED" });
+    } else onError(e);
+  };
+  const teams = useBillingSummary().data?.teams ?? [];
   const create = useMutation({
     mutationFn: () =>
-      api.request("/boards", { method: "POST", body: { folderId }, schema: boardDetailSchema }),
+      api.request("/boards", {
+        method: "POST",
+        body: view === "team" && teams[0] ? { orgId: teams[0].orgId } : { folderId },
+        schema: boardDetailSchema,
+      }),
     onSuccess: (board) => navigate(`/board/${board.id}`),
-    onError,
+    onError: onLimitOrError,
   });
-  const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
   const createPrivate = useMutation({
     mutationFn: () => createPrivateBoard(api, folderId),
     onSuccess: ({ board, encodedKey }) =>
       navigate(withKey(`/board/${board.id}`, encodedKey), { state: NEW_PRIVATE_BOARD_STATE }),
-    onError: (e) => {
-      if (e instanceof ApiRequestError && e.status === 402) setUpgradeMessage(e.message);
-      else onError(e);
-    },
+    onError: onLimitOrError,
   });
   // Signing out wipes the keys of private boards from this device: warn first.
   const [signOutWarning, setSignOutWarning] = useState<{
@@ -154,6 +168,11 @@ export function DashboardPage() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem disabled>{session?.user.email}</DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/app/settings/billing">
+                <CreditCard aria-hidden="true" /> Plan and billing
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
                 requestSignOut(false);
@@ -292,7 +311,7 @@ export function DashboardPage() {
                     view={view}
                     folders={folders.data?.folders ?? []}
                     onChanged={refresh}
-                    onError={onError}
+                    onError={onLimitOrError}
                   />
                 </li>
               ))}
@@ -301,9 +320,10 @@ export function DashboardPage() {
         </main>
       </div>
       <UpgradeDialog
-        message={upgradeMessage}
+        message={upgrade?.message ?? null}
+        code={upgrade?.code ?? "PLAN_REQUIRED"}
         onOpenChange={(open) => {
-          if (!open) setUpgradeMessage(null);
+          if (!open) setUpgrade(null);
         }}
       />
       <Dialog
@@ -400,6 +420,14 @@ function BoardCard({
             <Lock aria-label="End-to-end encrypted" className="size-3.5 shrink-0" />
           )}
           <span className="truncate">{title}</span>
+          {board.locked && !trash && (
+            <span
+              className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground"
+              title="Above your plan's board limit: read-only until you upgrade or free a slot"
+            >
+              Read-only
+            </span>
+          )}
         </span>
         <span className="text-xs text-muted-foreground">
           {trash

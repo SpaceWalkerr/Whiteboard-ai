@@ -62,7 +62,10 @@ export async function signInWithMagicLink(page: Page, user: E2EUser): Promise<vo
 export async function setPlan(user: E2EUser, plan: "free" | "pro" | "team"): Promise<void> {
   const { error } = await adminClient()
     .from("entitlements")
-    .upsert({ user_id: user.id, plan }, { onConflict: "user_id" });
+    .upsert(
+      { user_id: user.id, plan, source: "manual", source_id: "manual" },
+      { onConflict: "user_id,source,source_id" },
+    );
   if (error) throw new Error(`setPlan failed: ${error.message}`);
 }
 

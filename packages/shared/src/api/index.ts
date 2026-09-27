@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { boardLimitReasonSchema } from "../billing";
 import { PLANS } from "../plans";
 
 /**
@@ -49,13 +50,16 @@ export const boardSummarySchema = z.object({
   isPrivate: z.boolean(),
   /** Private boards: the title encrypted with the board key (`title` is a placeholder). */
   encryptedTitle: envelopeBase64Schema.nullable(),
+  /** Read-only because it's above the owner's plan's board limit. */
+  locked: z.boolean().default(false),
 });
 export type BoardSummary = z.infer<typeof boardSummarySchema>;
 
 export const boardListResponseSchema = z.object({ boards: z.array(boardSummarySchema) });
 
 export const boardListQuerySchema = z.object({
-  view: z.enum(["mine", "shared", "recent", "trash"]).default("mine"),
+  /** "team": boards in the team workspaces I belong to. */
+  view: z.enum(["mine", "shared", "recent", "trash", "team"]).default("mine"),
   q: z.string().trim().max(120).optional(),
   folderId: z.uuid().optional(),
 });
@@ -65,6 +69,8 @@ export const PRIVATE_BOARD_TITLE = "Private board";
 
 export const createBoardSchema = z.object({
   title: titleSchema.optional(),
+  /** A team workspace I belong to; my personal workspace when omitted. */
+  orgId: z.uuid().optional(),
   folderId: z.uuid().nullable().optional(),
   /**
    * An end-to-end encrypted board (Pro/Team). The browser picks the id, because the
@@ -153,6 +159,8 @@ export const ticketResponseSchema = z.object({
   ticket: z.string(),
   role: boardRoleSchema,
   expiresAt: z.string(),
+  /** Set when the plan limits make the caller read-only (the ticket's role is then viewer). */
+  limitedBy: boardLimitReasonSchema.nullable().default(null),
 });
 export type TicketResponse = z.infer<typeof ticketResponseSchema>;
 
@@ -166,6 +174,8 @@ export const boardDetailSchema = z.object({
   /** Private boards only (null otherwise). */
   encryptedTitle: envelopeBase64Schema.nullable().default(null),
   keyCheck: envelopeBase64Schema.nullable().default(null),
+  /** Above the owner's plan's board limit: read-only for everyone until upgraded. */
+  locked: z.boolean().default(false),
 });
 export type BoardDetail = z.infer<typeof boardDetailSchema>;
 

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { billingApi } from "@/features/billing/api";
 import { Check, Copy, Link2, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { z } from "zod";
 import {
   createdShareLinkSchema,
@@ -271,6 +272,16 @@ function ShareDialogBody({
       </section>
 
       {canManage && (
+        <EditorSeatsSection
+          boardId={boardId}
+          onChanged={async () => {
+            await refresh();
+          }}
+          onError={onError}
+        />
+      )}
+
+      {canManage && (
         <LinksSection
           boardId={boardId}
           links={state.links}
@@ -532,6 +543,75 @@ function LinksSection({
           </li>
         ))}
       </ul>
+    </section>
+  );
+}
+
+/**
+ * Editor seats: the owner's plan caps how many people may edit this board. Freeing a seat
+ * makes that person a viewer, so someone else can edit.
+ */
+function EditorSeatsSection({
+  boardId,
+  onChanged,
+  onError,
+}: {
+  boardId: string;
+  onChanged: () => Promise<void>;
+  onError: (e: unknown) => void;
+}) {
+  const { api } = useAuth();
+  const queryClient = useQueryClient();
+  const key = ["editor-seats", boardId];
+  const seats = useQuery({ queryKey: key, queryFn: () => billingApi(api).editorSeats(boardId) });
+  const release = useMutation({
+    mutationFn: (userId: string) => billingApi(api).releaseSeat(boardId, userId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: key });
+      await onChanged();
+    },
+    onError,
+  });
+  if (!seats.data) return null;
+  const active = seats.data.seats.filter((seat) => seat.active).length;
+  return (
+    <section aria-labelledby="seats-heading" className="grid gap-2">
+      <h3 id="seats-heading" className="text-sm font-semibold">
+        Editor seats
+      </h3>
+      <p className="text-xs text-muted-foreground">
+        {String(active)} of {String(seats.data.limit)} seats used besides you.{" "}
+        <Link to="/pricing" className="underline">
+          More editors
+        </Link>
+      </p>
+      {seats.data.seats.length > 0 && (
+        <ul className="grid gap-1 text-sm">
+          {seats.data.seats.map((seat) => (
+            <li key={seat.userId} className="flex items-center justify-between gap-2">
+              <span className="truncate">
+                {seat.displayName}
+                {!seat.active && (
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    (read-only: over limit)
+                  </span>
+                )}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label={`Free ${seat.displayName}'s editor seat`}
+                disabled={release.isPending}
+                onClick={() => {
+                  release.mutate(seat.userId);
+                }}
+              >
+                Free seat
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

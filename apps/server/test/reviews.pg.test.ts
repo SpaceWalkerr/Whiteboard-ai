@@ -96,7 +96,7 @@ async function setPlan(user: TestUser, plan: "free" | "pro", override: number | 
     .insert(entitlements)
     .values({ userId: user.id, plan, aiReviewsPerMonthOverride: override })
     .onConflictDoUpdate({
-      target: entitlements.userId,
+      target: [entitlements.userId, entitlements.source, entitlements.sourceId],
       set: { plan, aiReviewsPerMonthOverride: override },
     });
 }

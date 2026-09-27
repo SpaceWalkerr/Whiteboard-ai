@@ -50,8 +50,22 @@ services:
         sync: false
       - key: ROOM_TICKET_SECRET # signs 5-minute sync tickets; shared by all instances
         generateValue: true
-      - key: CRON_SECRET # bearer for /internal/* (trash purge cron, Phase 13)
+      - key: CRON_SECRET # bearer for /internal/* (trash purge, billing sweep crons)
         generateValue: true
+      - key: RAZORPAY_KEY_ID # live key in production (rzp_live_…); test key on staging
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET # verifies X-Razorpay-Signature on /billing/webhooks/razorpay
+        sync: false
+      - key: RAZORPAY_PLAN_PRO_MONTHLY
+        sync: false
+      - key: RAZORPAY_PLAN_PRO_YEARLY
+        sync: false
+      - key: RAZORPAY_PLAN_TEAM_MONTHLY
+        sync: false
+      - key: RAZORPAY_PLAN_TEAM_YEARLY
+        sync: false
       - key: ANTHROPIC_API_KEY # AI reviews/hints; server-only, never sent to the browser
         sync: false
       - key: AI_DAILY_SPEND_LIMIT_USD # kill-switch: AI calls stop for the day at this spend
@@ -71,6 +85,28 @@ services:
           type: keyvalue
           name: whiteboard-redis
           property: connectionString
+
+  # Billing housekeeping every 15 minutes: re-fetches subscriptions whose webhooks may have
+  # been missed, sends grace-period reminders, and applies plans that ended (board locks +
+  # "downgraded" email). Idempotent; entitlement checks never depend on it running on time.
+  - type: cron
+    name: whiteboard-billing-sweep
+    runtime: node
+    region: singapore
+    plan: starter
+    schedule: "*/15 * * * *"
+    buildCommand: "true"
+    startCommand: >-
+      curl -fsS --max-time 120 -X POST -H "Authorization: Bearer $CRON_SECRET"
+      "$API_URL/internal/billing-sweep"
+    envVars:
+      - key: CRON_SECRET
+        fromService:
+          type: web
+          name: whiteboard-server
+          envVarKey: CRON_SECRET
+      - key: API_URL # the web service's public URL, e.g. https://api.example.com
+        sync: false
 
   - type: keyvalue
     name: whiteboard-redis

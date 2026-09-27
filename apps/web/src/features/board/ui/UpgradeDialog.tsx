@@ -1,5 +1,6 @@
 import { Check, Minus } from "lucide-react";
-import { PLAN_LIMITS, PLAN_NAMES, PLANS } from "@whiteboard/shared/plans";
+import { Link } from "react-router";
+import { PLAN_NAMES, PLANS, type LimitCode } from "@whiteboard/shared/entitlements";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,26 +9,34 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FEATURE_ROWS } from "@/features/billing/features";
 
-/** Monthly prices from SPEC.md, for the comparison only (billing arrives in Phase 10). */
-const PRICES = { free: "Free", pro: "₹399 · $8 / month", team: "₹999 · $15 / seat / month" };
+const TITLES: Record<LimitCode, string> = {
+  QUOTA_EXCEEDED: "Upgrade for more AI reviews",
+  BOARD_LIMIT: "Upgrade for unlimited boards",
+  EDITOR_LIMIT: "This board has reached its editor limit",
+  BOARD_LOCKED: "This board is read-only on your plan",
+  PLAN_REQUIRED: "Upgrade to unlock this",
+};
 
 /**
- * Shown when the server refuses with 402 (monthly AI reviews used up, or a Pro feature on
- * Free). Plans can't be bought yet, so it explains the plans and says upgrades are coming.
+ * The upgrade prompt shown at every plan limit (the server answered 402 with one of the
+ * shared limit codes): explains what happened, compares plans, links to checkout.
  */
 export function UpgradeDialog({
   message,
+  code = "QUOTA_EXCEEDED",
   onOpenChange,
 }: {
   message: string | null;
+  code?: LimitCode;
   onOpenChange: (open: boolean) => void;
 }) {
   return (
     <Dialog open={message !== null} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Upgrade for more AI reviews</DialogTitle>
+          <DialogTitle>{TITLES[code]}</DialogTitle>
           <DialogDescription>{message}</DialogDescription>
         </DialogHeader>
         <table className="w-full text-sm">
@@ -35,47 +44,42 @@ export function UpgradeDialog({
           <thead>
             <tr className="border-b text-left">
               <th scope="col" className="py-2 font-medium">
-                Plan
+                <span className="sr-only">Feature</span>
               </th>
-              <th scope="col" className="py-2 font-medium">
-                AI reviews / month
-              </th>
-              <th scope="col" className="py-2 font-medium">
-                Live hints
-              </th>
+              {PLANS.map((plan) => (
+                <th key={plan} scope="col" className="py-2 font-medium">
+                  {PLAN_NAMES[plan]}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {PLANS.map((plan) => (
-              <tr key={plan} className="border-b last:border-0">
-                <th scope="row" className="py-2 text-left font-medium">
-                  {PLAN_NAMES[plan]}
-                  <span className="block text-xs font-normal text-muted-foreground">
-                    {PRICES[plan]}
-                  </span>
+            {FEATURE_ROWS.map((row) => (
+              <tr key={row.label} className="border-b last:border-0">
+                <th scope="row" className="py-2 pr-2 text-left font-normal text-muted-foreground">
+                  {row.label}
                 </th>
-                <td className="py-2">
-                  {plan === "team"
-                    ? `${String(PLAN_LIMITS[plan].aiReviewsPerMonth)} per seat`
-                    : PLAN_LIMITS[plan].aiReviewsPerMonth}
-                </td>
-                <td className="py-2">
-                  {PLAN_LIMITS[plan].liveHints ? (
-                    <Check className="size-4" aria-label="Included" />
-                  ) : (
-                    <Minus className="size-4" aria-label="Not included" />
-                  )}
-                </td>
+                {PLANS.map((plan) => {
+                  const value = row.value(plan);
+                  return (
+                    <td key={plan} className="py-2">
+                      {value === true ? (
+                        <Check className="size-4" aria-label="Included" />
+                      ) : value === false ? (
+                        <Minus className="size-4" aria-label="Not included" />
+                      ) : (
+                        value
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
         </table>
-        <p className="text-sm text-muted-foreground">
-          Paid plans are coming soon. Your free allowance resets at the start of each month.
-        </p>
         <div className="flex justify-end gap-2">
-          <Button disabled title="Paid plans are coming soon">
-            Upgrade — coming soon
+          <Button asChild>
+            <Link to="/pricing">See plans and upgrade</Link>
           </Button>
           <Button
             variant="outline"

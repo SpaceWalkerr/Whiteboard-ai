@@ -2,8 +2,9 @@
 
 ## Current phase
 
-Phase 9 — End-to-end encrypted private rooms: implemented, awaiting manual verification.
-Phases 0–8 committed (the Phase 7 eval still needs a first run with a real `ANTHROPIC_API_KEY`).
+Phase 10 — Billing, plans and limits: implemented, awaiting manual verification (needs Razorpay
+test-mode keys and plans, see below). Phases 0–9 committed (the Phase 7 eval still needs a
+first run with a real `ANTHROPIC_API_KEY`).
 
 ## Done
 
@@ -609,6 +610,118 @@ Threat model, what the server can and cannot see, and limitations: [docs/securit
     browsers** is free of the labels and the key; with the device key wiped the board asks for
     the link and opens after pasting it. Full E2E suite: 22/22.
 
+### Phase 10 — Billing (Razorpay), entitlements and plan limits
+
+- **Entitlements in one place** (`packages/shared/src/entitlements/`, pure TypeScript): the
+  plan table (`PLAN_LIMITS` now also has `boards` 3/∞/∞ and `editorsPerBoard` 3/10/50;
+  `plans.ts` re-exports it), `effectiveEntitlement(grants, now)` (best grant still valid —
+  expiry compared at every check), subscription → grant rules (`subscriptionValidUntil`,
+  `nextGrace`: 7 days from the FIRST failed payment), and every limit decision
+  (`checkBoardCreate`, `checkEditorSeat`, `checkAiReview`, `checkFeature`,
+  `boardsToKeepEditable`, `seatsToKeepActive`, `isStudentEmail`) with shared codes
+  `BOARD_LIMIT | EDITOR_LIMIT | BOARD_LOCKED | QUOTA_EXCEEDED | PLAN_REQUIRED`. The REST API, the
+  sync server's upgrade check and the web app's prompts all use these.
+- **Data** (migration `0008_billing`, applied to the dev project; RLS on every new table):
+  `plans` (catalog, seeded: ₹399/mo, ₹3,990/yr, ₹999/seat/mo, ₹9,990/seat/yr), `subscriptions`
+  (our copy of the provider's state; one live subscription per workspace — partial unique
+  index), `billing_events` (`UNIQUE(provider, provider_event_id)`; ids and type only, no
+  customer data), `invoices`, `coupons` (code → provider offer), `student_trials` (one per user
+  and one per email hash, kept after account deletion), `board_editor_seats`,
+  `boards.plan_locked_at`. `entitlements` became **one row per grant** (`source` =
+  subscription | team_seat | student_trial | manual, `source_id`, `valid_until`, `seats`,
+  `org_id`, `expiry_processed_at`); existing rows became `manual` grants.
+- **Provider** (`apps/server/src/billing/`): `BillingProvider` interface (`createCheckout`,
+  `getSubscription`, `listInvoices`, `cancel`, `changePlan`, `verifyWebhook`) with
+  provider-neutral types; `RazorpayProvider` over plain `fetch` + zod (Basic auth, 10 s
+  timeout, ids checked before they go into URLs, 4xx = refusal with Razorpay's reason vs.
+  outage). Everything else works with the neutral types, so a Merchant of Record adapter is a
+  second implementation.
+- **Webhook** `POST /billing/webhooks/razorpay` (own scope: raw-body parser, no session):
+  HMAC-SHA256 of the exact body, constant-time compare, event id from `x-razorpay-event-id` →
+  `syncSubscription` in **one transaction**: per-subscription advisory lock → insert the event
+  id (conflict = duplicate → 200, nothing else happens) → **fetch the subscription and its
+  invoices from Razorpay** (the event body is never trusted for state) → apply status, period,
+  seats, grace → upsert invoices → receipts marked sent (once) → coupon redemption (once) →
+  re-derive grants → lock/unlock boards and suspend/restore seats → audit row. Emails and
+  socket re-checks run after commit. Provider unreachable → 500, the event id rolls back, the
+  retry applies it. The same function serves `POST /billing/refresh` (the browser calls it
+  after Checkout.js reports success, so features unlock without waiting for the webhook — and
+  local development needs no public webhook URL) and the sweep.
+- **Grace → downgrade:** `pending`/`halted` → `past_due`/`halted`, `grace_until = first failure
+  - 7 days`(retries don't extend it), "payment failed" email once per episode; the plan is kept
+until`grace_until`, checked live. `POST /internal/billing-sweep`(CRON_SECRET; Render Cron
+every 15 min added to`render.yaml`): re-fetches renewing subscriptions past their period end
+(missed webhooks), sends the grace reminder 2 days before (once), and for every grant that
+ended enforces the lower limits and sends "downgraded" (once, via `expiry_processed_at`).
+**Boards are never deleted:** above the Free limit the least recently edited become
+read-only (`plan_locked_at`); editable ones keep their place; trashing a board or upgrading
+    unlocks the next ones. A later successful charge restores everything.
+- **Checkout / manage:** `GET /billing/plans` (public), `GET /billing` (plan, source, validity,
+  subscriptions with next charge/grace/scheduled change, invoices, usage, student offer,
+  teams), `POST /billing/checkout` (per-user lock; reuses an unpaid checkout for 30 min, so a
+  double click never creates two; 409 if the workspace already pays; coupon validated →
+  Razorpay offer), `GET /billing/coupon`, `POST /billing/cancel` (at period end, idempotent,
+  purchaser or team owner/admin only), `POST /billing/change-plan` (monthly ↔ yearly and seats
+  within a tier: more per year → `now`, less → `cycle_end`; fewer seats than members → 409;
+  Razorpay refusals, e.g. UPI mandates, shown with the reason), `POST /billing/student-trial`.
+  Audit rows: `billing.checkout / subscription_sync / cancel / change_plan / student_trial /
+downgrade`, `team.member_add/remove`, `editor_seat.release`.
+- **Limits enforced server-side:** board limit on create, duplicate and restore under a
+  per-owner advisory lock (parallel requests can't both take the last slot); editor seats —
+  claimed on ticket/upgrade/REST write under a per-board lock, checked again by the **sync
+  server's upgrade re-check** (a forged "editor" ticket is capped to viewer and its writes are
+  dropped), invites/promotions past the limit → 402; locked boards are read-only for everyone
+  (REST `write` → 402 `BOARD_LOCKED`, tickets and sockets → viewer, `limitedBy` in the ticket
+  response). Plan changes publish a new `plan` revocation event so live sockets re-check.
+  Private boards, live hints and interview mode use `checkFeature`; AI reviews use
+  `checkAiReview` with the Team allowance **pooled** (300 × seats; lock per team).
+- **Team workspaces (minimal):** buying Team creates (or reuses) a team workspace; owner/admins
+  add members by email (existing accounts) up to the seat count and remove them
+  (`/teams/:orgId`…); members get Team via `team_seat` grants (owner first, then join order) and
+  edit the team's boards (org member → editor, subject to seats); `POST /boards {orgId}`
+  creates a board in the team; the dashboard has a "Team boards" view.
+- **Emails** (React Email, `BillingEmails.tsx`): receipt, payment failed, grace reminder,
+  downgraded.
+- **Web:** `/pricing` (monthly/yearly, features from `PLAN_LIMITS`, Team seats, coupon check,
+  student offer; signed-out → sign in), `/app/settings/billing` (plan + usage, grace banner,
+  next charge, cancel with confirmation, seats / interval change, invoices with receipt links,
+  student offer, team members), Razorpay Checkout.js loaded only at checkout, the upgrade
+  dialog now titles each limit and links to the plans (every 402: boards, private boards, AI
+  quota, hints), a "Read-only: over plan limit / editor limit" button on the board, a
+  "Read-only" badge on locked dashboard cards, "Editor seats" (used/limit, free a seat) in the
+  share dialog, "Plan and billing" in the account menu.
+- Dev tooling: `plan:set` writes a `manual` grant and applies limits;
+  `pnpm --filter @whiteboard/server billing:expire <email>` (dev/test only) moves a user's
+  paid end dates to now and runs the sweep, to see "locks at period end" without waiting.
+- **Tests** (`pnpm lint && pnpm typecheck && pnpm test` on 2026-09-27: shared 140, graph 87,
+  web 146, server 257/258 — the one failure is the known 2,000-shape cold-load timing test,
+  7.6 s; Playwright 23/24 — the one failure is the 2,000-shape load-time test, see Known
+  issues): shared: `entitlements.test.ts` (32: grants/expiry, subscription validity, grace
+  rules, every check, board/seat selection, student domains; env: Razorpay vars).
+  Server +32: `razorpay.test.ts` (9: signatures incl. tampered/wrong secret/missing id,
+  request shapes, status/invoice mapping, refusal vs outage, unsafe ids);
+  `billing.webhook.pg.test.ts` (16, real Postgres + scripted provider): subscribe → Pro +
+  one receipt; double-click checkout reused, second subscription 409; **same event 5× →
+  byte-identical state, emails, audit rows** (even with the provider's state changed
+  between replays); out-of-order events; parallel events; bad signature / tampered body /
+  missing id → 400 and nothing stored; provider outage → 500 → retry applies; foreign
+  subscription ignored; **failed payment → Pro through day 6, one reminder, Free on day 8
+  before any sweep, sweep locks the 2 least recently edited of 5 boards (none deleted),
+  downgrade email once, locked = read-only via REST and ticket, a late successful charge
+  unlocks**; cancel → Pro until period end → Free + lock; only the purchaser cancels; seats
+  up = now / down = cycle end; **Pro → Team mid-cycle**; seats reduced → last-joined member
+  loses Team + email; pooled quota; coupons (invalid, wrong plan, offer passed, redeemed once).
+  `limits.pg.test.ts` (7): **Free 4th board 402** (create, duplicate, restore), 3 parallel
+  creates → exactly one 201, expired grant = Free at once; **4th editor on a Free board: ticket
+  viewer + `EDITOR_LIMIT`, REST write 402, forged editor ticket's WebSocket write dropped**,
+  editor invite refused, freeing a seat lets them in; downgrade suspends the last-claimed seat
+  and upgrade restores it; private board needs a plan; student offer once per account and per
+  email (also after account re-creation), non-academic 403.
+  Web (`billing.test.tsx`: checkout hand-over and dismissal, pricing signed out, settings:
+  next charge, invoices, cancel only after confirming, grace banner, student offer; upgrade
+  dialog titles). Playwright +2 (`billing.spec.ts`: real 4th-board limit → prompt → pricing;
+  mocked Razorpay checkout → refresh → "Your plan: Pro").
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -870,6 +983,34 @@ Threat model, what the server can and cannot see, and limitations: [docs/securit
     lock needs it) and delete it at the end; `ai_usage` still counts the review.
   - No new dependencies (WebCrypto is built in).
 
+- **Phase 10 decisions (approved plan, "start with your recommendations"):**
+  - Subscriptions belong to a workspace (Pro → personal, Team → team workspace); entitlements
+    are derived grants per user, never written by hand. Expiry is compared with `now` at every
+    check; the sweep only enforces board locks/seat suspensions and sends emails, so a late
+    cron can never extend paid time (worst case: locks appear up to one sweep interval late).
+  - Webhook state is always fetched from Razorpay inside a per-subscription lock (event order
+    irrelevant); duplicates are rejected by the event-id row in the same transaction.
+  - The provider fetch happens inside the database transaction (holds one connection for a
+    few hundred ms per event) — simplest way to make "fetch + apply" atomic per subscription.
+  - Editor limit = distinct people with edit access (owner + claimed seats), claimed on first
+    edit connection; a 4th editor is connected read-only with a reason rather than refused.
+    Freeing a seat also makes a member a viewer (otherwise their open tab re-claims it at
+    once — found by the test).
+  - Seat claim order uses the database clock (arrival order), not the injectable app clock.
+  - Plan change rule: more money per year → now, less → at cycle end (never cut paid time).
+    Pro → Team is a new Team subscription (different workspace), then cancel Pro.
+  - Razorpay over plain `fetch` + zod (no SDK dependency). `customer_notify: false`: our emails
+    replace Razorpay's. Receipts are "at most once" (marked in the transaction, sent after).
+  - Student offer: trusts the `email` claim of the Supabase token (same as invites); one per
+    account and per email hash forever.
+  - Coupons: validated at checkout, counted at first activation (concurrent checkouts can
+    overshoot `max_redemptions` by the number in flight; Razorpay offers can carry their own cap).
+  - Downgrade keeps the most recently edited boards editable (no "choose" UI yet).
+  - Charges are INR only via Razorpay; prices treated as tax-inclusive. USD waits for a MoR.
+  - Tests that aren't about limits get a Pro grant in their setup (dashboard suite creates
+    more than 3 boards); the limits themselves have their own suites.
+  - No new dependencies.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -973,8 +1114,6 @@ Threat model, what the server can and cannot see, and limitations: [docs/securit
 - Reviews read the stored board: an edit made in the last ~50 ms before "Start" (or while
   offline) isn't included; the dialog waits for "Saved".
 - Hints are best effort: model errors return no hints silently (logged server-side).
-- Team review allowance is per seat, not yet pooled across an organization (Phase 10).
-- The "Upgrade" button is disabled ("coming soon") until billing exists (Phase 10).
 
 - **Phase 8:** the rules-based "Check design" runs in the browser, so hiding it from the
   candidate during an interview is UI-only (a determined candidate could run the same
@@ -1025,24 +1164,61 @@ Threat model, what the server can and cannot see, and limitations: [docs/securit
 - The "Duplicate" item is shown disabled for private boards; a browser-side duplicate
   (decrypt → re-encrypt under a new key) is possible later.
 
+- **Phase 10:** not yet run against real Razorpay test mode (needs keys + 4 plans in the
+  dashboard; manual verification below). Two provider behaviours to confirm then:
+  proration/charging when a plan changes with `schedule_change_at=now` (Razorpay's docs don't
+  specify), and what the subscription looks like after `cancel_at_cycle_end` (we keep our own
+  `cancel_at_period_end` flag, so either way the plan ends at the period end).
+- Razorpay can't update subscriptions authorised via UPI or e-mandate: changing interval/seats
+  then fails with Razorpay's reason (the user must cancel and subscribe again).
+- Webhooks can't reach localhost: local development relies on `POST /billing/refresh` after
+  checkout; renewals/failures locally only arrive via the sweep's re-fetch (after the period
+  end) or a tunnel.
+- The "payment failed" email links to Razorpay's hosted page for the subscription; the grace
+  reminder links to billing settings (no live provider call in the sweep).
+- Coupon limits can be overshot by concurrent checkouts (counted at activation).
+- Emails are best effort after commit: a Resend failure loses that email (logged).
+- A person editing through a share link can re-claim a freed editor seat; revoke the link to
+  stop that. Pending editor invites don't reserve seats (the invitee may join read-only).
+- Team members must already have an account (add by email of an existing profile); no
+  pending team invites yet. Team workspaces have no rename/transfer UI beyond checkout.
+- The sweep's step 1 re-fetches up to 50 stale subscriptions per run; the webhook remains the
+  primary path.
+- GST/tax invoices: Razorpay's invoices are shown as-is; tax handling needs an accountant's
+  confirmation before launch.
+- The Playwright "2,000-shape board loads in under 1.5 s" test passed and failed on
+  back-to-back runs on 2026-09-27 (1.5–2.0 s; the other 23 E2E tests pass). Same
+  network-to-Singapore variance as the server's 2,000-shape test above; the only change on
+  that path is one extra left join (editor seat) in the access query (no extra round trip).
+- Web bundle: `/pricing` and billing settings are separate lazy chunks; the upgrade dialog
+  (board, dashboard) pulls in only the small feature table.
+
 ## Later
+
+- Phase 10 follow-ups: Merchant of Record provider (Paddle / Lemon Squeezy) for USD customers
+  (second `BillingProvider`); "choose which boards stay editable" after a downgrade; a
+  pending-editor-invite seat reservation; Razorpay "update payment method" flow in billing
+  settings; admin coupon management UI (coupons are rows today); an `email_outbox` if emails
+  must be exactly-once; PostHog events for upgrade prompt shown / checkout started / paid.
+- Phase 11: prerender `/pricing` (it's a client-rendered route now).
+- Phase 12: CSP must allow `https://checkout.razorpay.com` (script + frame).
 
 - Phase 9 follow-ups: key rotation (re-encrypt into a new board/key and revoke the old),
   browser-side duplicate/export of private boards, the account "export all my boards" must
   skip or export private boards as ciphertext, optional padding of envelopes, code-delivery
   integrity (SRI / published build hashes), public read-only private links (with key) and
   interviews on private boards (client-side replay) if customers ask.
-- Phase 10: Team org workspaces — let org admins see every interview summary in the org;
-  per-org custom question banks (a table); lock scorecards after a hiring decision; seat-based
-  entitlement (today the person starting an interview needs a Team entitlement).
+- Team workspaces follow-ups: let org admins see every interview summary in the org; per-org
+  custom question banks (a table); lock scorecards after a hiring decision; pending team
+  invites for people without an account; rename/transfer a team; move boards between
+  workspaces.
 - Session replay outside interviews for Pro (SPEC: "Session replay + PDF export", Free view
   only) — reuse `ReplayTimeline`/`ReplayView` with a board-history route and plan checks.
 - Unscheduled: show who drew what in the replay (per-frame authors are stored); push notes to
   other interviewers instantly over an interviewer-only channel if polling feels slow.
 - Phase 12: Sentry for replay load failures and PDF export errors.
 
-- Phase 10: pooled Team AI allowance; the upgrade dialog's button → checkout; plan changes
-  via billing webhooks (audited), not the dev script; ai_usage-based cost dashboard.
+- Later (from Phase 10): ai_usage-based cost dashboard.
 - Phase 12: Sentry for AI failures (refusals, invalid output rate), PostHog events for review
   started/completed/upgrade shown; alert when daily spend nears the limit.
 - Unscheduled: a "healthy design" eval board to measure false positives; run the eval in CI
@@ -1056,14 +1232,14 @@ Threat model, what the server can and cannot see, and limitations: [docs/securit
   batches in one statement; load a board in one query instead of three.
 - Phase 12 (security): enforce presence `user.id` == the socket's authenticated user id
   server-side (today a client may display any id/name in its own presence).
-- Phase 10: retention limits for archived history per plan.
+- Unscheduled (not built in Phase 10): retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
 - Unscheduled: live rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside
   live AI hints.
 - Unscheduled: an explicit `instances` field on service shapes in the properties panel;
   guessing kinds for plain shapes from labels ("Redis" rectangle → cache), probably via AI;
   per-board rule settings (disable a rule, `maxSyncDepth`).
-- Phase 10: team organizations (members, admins), ownership transfer, per-plan limits.
+- Unscheduled: board ownership transfer.
 - Phase 13: Render Cron Job calling `POST /internal/purge-trash` daily with `CRON_SECRET`;
   set `TRUST_PROXY=1` on Render so rate limits see real client IPs.
 - Phase 11: prerender public pages (landing, pricing, templates, docs, legal) at build time.

@@ -3,6 +3,7 @@ import { SYNC_SUBPROTOCOL, TICKET_PROTOCOL_PREFIX } from "@whiteboard/shared/syn
 import type { Database } from "@whiteboard/shared/db";
 import { resolveBoardAccess, type BoardAccess } from "../access/boardAccess";
 import type { TicketIssuer } from "../auth/tickets";
+import { planLimitsFor } from "../billing/limits";
 import type { AuthorizeConnection } from "./auth";
 
 export function offeredProtocols(request: IncomingMessage): string[] {
@@ -18,9 +19,15 @@ export function offeredProtocols(request: IncomingMessage): string[] {
  * Production WebSocket authorization. The upgrade must offer the sync subprotocol and a valid
  * room ticket for this board. The ticket is then re-checked against the database (membership,
  * share link, public flag), so a ticket issued before an access change can't be used after it.
- * The effective role is the lower of the ticket's role and the current one.
+ * The effective role is the lower of the ticket's role and the current one, and plan limits
+ * apply on top (a locked board or no free editor seat → viewer) — the same check as the REST
+ * API, so a raw WebSocket client can't bypass it.
  */
-export function ticketAuthorizer(tickets: TicketIssuer, db: Database): AuthorizeConnection {
+export function ticketAuthorizer(
+  tickets: TicketIssuer,
+  db: Database,
+  now: () => Date = () => new Date(),
+): AuthorizeConnection {
   return async (request, boardId) => {
     const protocols = offeredProtocols(request);
     const offered = protocols.find((p) => p.startsWith(TICKET_PROTOCOL_PREFIX));
@@ -41,7 +48,13 @@ export function ticketAuthorizer(tickets: TicketIssuer, db: Database): Authorize
     if (!current || current.deleted || current.role === null) return { ok: false, status: 403 };
     if (claims.viaPublic && !current.isPublic && current.via === "public")
       return { ok: false, status: 403 };
-    const role = lowerRole(claims.role, current);
+    let role = lowerRole(claims.role, current);
+    if (role !== "viewer") {
+      const limits = await planLimitsFor(db, { ...current, role }, claims.userId, now(), {
+        claim: true,
+      });
+      if (limits.limitedBy !== null) role = "viewer";
+    }
     return {
       ok: true,
       identity: {

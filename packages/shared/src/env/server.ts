@@ -148,6 +148,24 @@ export const serverEnvSchema = z
     /** Live-hint calls per user per hour. */
     AI_HINTS_PER_HOUR: z.coerce.number().int().min(0).max(1_000).default(20),
 
+    /**
+     * Razorpay (billing, Phase 10). Test-mode keys (rzp_test_…) outside production. Without
+     * a key id, checkout is unavailable (the rest of the app works; plans can still be set
+     * with the dev script). All server-only except the key id, which Checkout.js also needs.
+     */
+    RAZORPAY_KEY_ID: z
+      .string()
+      .regex(/^rzp_(test|live)_[A-Za-z0-9]+$/, { message: "must be a Razorpay key id (rzp_…)" })
+      .optional(),
+    RAZORPAY_KEY_SECRET: z.string().min(10).optional(),
+    /** Secret set on the webhook in the Razorpay dashboard (verifies X-Razorpay-Signature). */
+    RAZORPAY_WEBHOOK_SECRET: z.string().min(10).optional(),
+    /** Razorpay plan ids (plan_…) for each catalog plan, created in the Razorpay dashboard. */
+    RAZORPAY_PLAN_PRO_MONTHLY: z.string().startsWith("plan_").optional(),
+    RAZORPAY_PLAN_PRO_YEARLY: z.string().startsWith("plan_").optional(),
+    RAZORPAY_PLAN_TEAM_MONTHLY: z.string().startsWith("plan_").optional(),
+    RAZORPAY_PLAN_TEAM_YEARLY: z.string().startsWith("plan_").optional(),
+
     /** Hard deadline for graceful shutdown; must stay below Render's shutdown window. */
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(290_000).default(25_000),
   })
@@ -161,6 +179,26 @@ export const serverEnvSchema = z
     require("SUPABASE_SERVICE_ROLE_KEY", production, "is required in production");
     require("CRON_SECRET", production, "is required in production");
     require("ANTHROPIC_API_KEY", production, "is required in production");
+    const razorpay = env.RAZORPAY_KEY_ID !== undefined;
+    for (const key of [
+      "RAZORPAY_KEY_ID",
+      "RAZORPAY_KEY_SECRET",
+      "RAZORPAY_WEBHOOK_SECRET",
+      "RAZORPAY_PLAN_PRO_MONTHLY",
+      "RAZORPAY_PLAN_PRO_YEARLY",
+      "RAZORPAY_PLAN_TEAM_MONTHLY",
+      "RAZORPAY_PLAN_TEAM_YEARLY",
+    ] as const) {
+      require(key, production, "is required in production");
+      require(key, razorpay && !production, "is required when RAZORPAY_KEY_ID is set");
+    }
+    if (production && env.RAZORPAY_KEY_ID?.startsWith("rzp_test_")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RAZORPAY_KEY_ID"],
+        message: "must be a live key in production",
+      });
+    }
     if (production && env.EMAIL_TRANSPORT !== "resend") {
       ctx.addIssue({
         code: "custom",

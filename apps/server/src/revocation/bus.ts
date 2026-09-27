@@ -18,6 +18,8 @@ export const revocationEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("public_off"), boardId: z.uuid() }),
   z.object({ type: z.literal("board_deleted"), boardId: z.uuid() }),
   z.object({ type: z.literal("interview"), boardId: z.uuid() }),
+  /** The board was locked/unlocked by its owner's plan: every socket re-checks its role. */
+  z.object({ type: z.literal("plan"), boardId: z.uuid() }),
 ]);
 export type RevocationEvent = z.infer<typeof revocationEventSchema>;
 

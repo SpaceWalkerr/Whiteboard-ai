@@ -6,7 +6,7 @@ import type { Logger } from "pino";
 import type { HealthResponse } from "@whiteboard/shared/schemas";
 import { AppError, type ErrorBody } from "./errors";
 import { runReadinessChecks, type DependencyCheck } from "./http/readiness";
-import { registerApi, registerInternalRoutes } from "./api";
+import { registerApi, registerBillingWebhook, registerInternalRoutes } from "./api";
 import type { ApiDeps } from "./api/deps";
 import { registerRequestAuth } from "./auth/requestAuth";
 
@@ -99,6 +99,11 @@ export function buildApp(options: AppOptions) {
     // Scheduled-job endpoints: CRON_SECRET only, no user session.
     void app.register(async (scope) => {
       registerInternalRoutes(scope, api);
+      await Promise.resolve();
+    });
+    // Payment provider webhooks: signature only, raw body, no user session.
+    void app.register(async (scope) => {
+      registerBillingWebhook(scope, api);
       await Promise.resolve();
     });
   }

@@ -21,6 +21,16 @@ const ReplayPage = lazy(() =>
   import("@/features/interview/replay/ReplayPage").then((m) => ({ default: m.ReplayPage })),
 );
 
+// Billing pages load on demand (Razorpay's script loads only at checkout).
+const PricingPage = lazy(() =>
+  import("@/features/billing/PricingPage").then((m) => ({ default: m.PricingPage })),
+);
+const BillingSettingsPage = lazy(() =>
+  import("@/features/billing/BillingSettingsPage").then((m) => ({
+    default: m.BillingSettingsPage,
+  })),
+);
+
 // The board pulls in Konva and Yjs; load it only when a board is opened.
 const BoardRoute = lazy(() =>
   import("@/features/board/BoardRoute").then((m) => ({ default: m.BoardRoute })),
@@ -37,6 +47,24 @@ export function App({ env }: { env: WebEnv }) {
           <Routes>
             <Route path="/" element={<HomePage apiUrl={env.VITE_API_URL} />} />
             <Route path="/sign-in" element={<SignInPage />} />
+            <Route
+              path="/pricing"
+              element={
+                <Suspense fallback={<LoadingPage label="Loading plans…" />}>
+                  <PricingPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/app/settings/billing"
+              element={
+                <RequireAuth>
+                  <Suspense fallback={<LoadingPage label="Loading billing…" />}>
+                    <BillingSettingsPage />
+                  </Suspense>
+                </RequireAuth>
+              }
+            />
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route
               path="/app"

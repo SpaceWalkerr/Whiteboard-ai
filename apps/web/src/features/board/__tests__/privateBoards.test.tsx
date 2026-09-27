@@ -35,6 +35,7 @@ async function privateDetail(title = "Launch plan") {
     isPrivate: true,
     keyCheck: bytesToBase64(await createKeyCheck(roomKey)),
     encryptedTitle: bytesToBase64(await encryptText(roomKey, "title", title)),
+    locked: false,
   };
   return { detail, encoded };
 }

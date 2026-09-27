@@ -10,9 +10,26 @@ import {
   type BoardSummary,
   type TicketResponse,
 } from "@whiteboard/shared/api";
-import { and, boardMembers, boards, boardVisits, eq, folders, sql } from "@whiteboard/shared/db";
+import {
+  and,
+  boardMembers,
+  boards,
+  boardVisits,
+  eq,
+  folders,
+  memberships,
+  organizations,
+  sql,
+} from "@whiteboard/shared/db";
 import { can, resolveBoardAccess, type BoardAccess, type BoardAction } from "../access/boardAccess";
+import { checkFeature } from "@whiteboard/shared/entitlements";
 import { getEntitlement } from "../ai/entitlements";
+import {
+  assertBoardSlot,
+  enforceOwnerLimits,
+  planLimitsFor,
+  throwIfBlocked,
+} from "../billing/limits";
 import { audit } from "../audit/audit";
 import { requireUser } from "../auth/requestAuth";
 import {
@@ -24,7 +41,7 @@ import {
   PrivateBoardError,
   UnauthorizedError,
 } from "../errors";
-import type { ApiDeps } from "./deps";
+import { nowOf, type ApiDeps } from "./deps";
 import { parse } from "./validation";
 import { THUMBNAIL_URL_TTL_SECONDS } from "../storage/thumbnails";
 import { ensureWorkspace } from "./workspace";
@@ -55,6 +72,15 @@ export async function authorize(
     throw new ForbiddenError("You don't have access to this board.");
   }
   if (!can(access.role, action)) throw new ForbiddenError();
+  if (action === "write") {
+    // Plan limits (locked board, editor seats): the same check as tickets and the sync server.
+    const limits = await planLimitsFor(deps.db, access, userId, nowOf(deps), { claim: true });
+    if (limits.limitedBy !== null)
+      throw new PaymentRequiredError(
+        limits.limitedBy,
+        limits.message ?? "Upgrade to edit this board.",
+      );
+  }
   return { ...access, role: access.role };
 }
 
@@ -67,7 +93,7 @@ export function boardDetail(
   access: Pick<
     BoardAccess,
     "boardId" | "title" | "isPublic" | "isPrivate" | "encryptedTitle" | "keyCheck"
-  >,
+  > & { locked?: boolean },
   role: BoardAccess["role"] & string,
 ): BoardDetail {
   return {
@@ -78,6 +104,7 @@ export function boardDetail(
     isPrivate: access.isPrivate,
     encryptedTitle: base64(access.encryptedTitle),
     keyCheck: base64(access.keyCheck),
+    locked: access.locked ?? false,
   };
 }
 
@@ -115,22 +142,57 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       ? sql`and b.deleted_at is not null and b.deleted_at > now() - make_interval(days => ${TRASH_RETENTION_DAYS})`
       : sql`and b.deleted_at is null`;
     const order = query.view === "recent" ? sql`v.last_opened_at desc` : sql`b.updated_at desc`;
+    // Team workspaces: every member sees the team's boards (access comes from membership).
+    const teamBoards = () =>
+      deps.db.execute<{
+        id: string;
+        title: string;
+        role: "owner" | "editor" | "viewer";
+        folder_id: string | null;
+        is_public: boolean;
+        updated_at: string;
+        deleted_at: string | null;
+        last_opened_at: string | null;
+        thumbnail_path: string | null;
+        is_private: boolean;
+        encrypted_title: Buffer | null;
+        locked: boolean;
+      }>(sql`
+        select b.id, b.title,
+               case when bm.role = 'owner' or o.role in ('owner', 'admin') then 'owner'
+                    else 'editor' end as role,
+               b.folder_id, b.is_public, b.updated_at::text, b.deleted_at::text,
+               v.last_opened_at::text, b.thumbnail_path, b.is_private, b.encrypted_title,
+               b.plan_locked_at is not null as locked
+        from ${boards} b
+        join ${memberships} o on o.org_id = b.org_id and o.user_id = ${user.id}
+        join ${organizations} w on w.id = b.org_id and w.kind = 'team'
+        left join ${boardMembers} bm on bm.board_id = b.id and bm.user_id = ${user.id}
+        left join ${boardVisits} v on v.board_id = b.id and v.user_id = ${user.id}
+        where b.deleted_at is null ${search} ${folder}
+        order by b.updated_at desc
+        limit 200`);
 
-    const rows = await deps.db.execute<{
-      id: string;
-      title: string;
-      role: "owner" | "editor" | "viewer";
-      folder_id: string | null;
-      is_public: boolean;
-      updated_at: string;
-      deleted_at: string | null;
-      last_opened_at: string | null;
-      thumbnail_path: string | null;
-      is_private: boolean;
-      encrypted_title: Buffer | null;
-    }>(sql`
+    const rows =
+      query.view === "team"
+        ? await teamBoards()
+        : await deps.db.execute<{
+            id: string;
+            title: string;
+            role: "owner" | "editor" | "viewer";
+            folder_id: string | null;
+            is_public: boolean;
+            updated_at: string;
+            deleted_at: string | null;
+            last_opened_at: string | null;
+            thumbnail_path: string | null;
+            is_private: boolean;
+            encrypted_title: Buffer | null;
+            locked: boolean;
+          }>(sql`
       select b.id, b.title, m.role, b.folder_id, b.is_public, b.updated_at::text, b.deleted_at::text,
-             v.last_opened_at::text, b.thumbnail_path, b.is_private, b.encrypted_title
+             v.last_opened_at::text, b.thumbnail_path, b.is_private, b.encrypted_title,
+             b.plan_locked_at is not null as locked
       from ${boardMembers} m
       join ${boards} b on b.id = m.board_id
       left join ${boardVisits} v on v.board_id = b.id and v.user_id = m.user_id
@@ -159,6 +221,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         thumbnailUrl: r.thumbnail_path ? (urls.get(r.thumbnail_path) ?? null) : null,
         isPrivate: r.is_private,
         encryptedTitle: base64(r.encrypted_title),
+        locked: r.locked,
       })),
     };
   });
@@ -170,15 +233,22 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     if (secret) {
       if (body.title !== undefined)
         throw new BadRequestError("A private board's title must be encrypted.");
-      const entitlement = await getEntitlement(deps.db, user.id);
-      if (!entitlement.privateRooms)
-        throw new PaymentRequiredError(
-          "PLAN_REQUIRED",
-          "Private end-to-end encrypted boards are included in the Pro and Team plans.",
-        );
+      throwIfBlocked(
+        checkFeature(await getEntitlement(deps.db, user.id, nowOf(deps)), "privateRooms"),
+      );
     }
     const board = await deps.db.transaction(async (tx) => {
-      const orgId = await ensureWorkspace(tx, user);
+      const personalOrgId = await ensureWorkspace(tx, user);
+      const orgId = body.orgId ?? personalOrgId;
+      if (body.orgId) {
+        const [team] = await tx
+          .select({ kind: organizations.kind })
+          .from(memberships)
+          .innerJoin(organizations, eq(organizations.id, memberships.orgId))
+          .where(and(eq(memberships.orgId, body.orgId), eq(memberships.userId, user.id)));
+        if (team?.kind !== "team") throw new NotFoundError("Team not found");
+      }
+      await assertBoardSlot(tx, user.id, nowOf(deps));
       if (body.folderId) {
         const [folder] = await tx
           .select({ id: folders.id })
@@ -288,7 +358,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const user = requireUser(request);
     const { id } = parse(idParams, request.params);
     const access = await authorize(deps, id, user.id, "delete");
-    await deps.db.transaction(async (tx) => {
+    const events = await deps.db.transaction(async (tx) => {
       await tx
         .update(boards)
         .set({ deletedAt: sql`now()` })
@@ -303,8 +373,11 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         metadata: { soft: true },
         ip: request.ip,
       });
+      // A slot under the plan's board limit may have opened: unlock the next board.
+      return access.ownerId ? enforceOwnerLimits(tx, access.ownerId, nowOf(deps)) : [];
     });
     await deps.revocations.publish({ type: "board_deleted", boardId: id });
+    for (const event of events) await deps.revocations.publish(event);
     return reply.status(204).send();
   });
 
@@ -314,6 +387,8 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const access = await authorize(deps, id, user.id, "delete", { allowDeleted: true });
     if (!access.deleted) return boardDetail(access, access.role);
     await deps.db.transaction(async (tx) => {
+      // Restoring takes a board slot like creating one does.
+      if (access.ownerId) await assertBoardSlot(tx, access.ownerId, nowOf(deps));
       const restored = await tx
         .update(boards)
         .set({ deletedAt: null })
@@ -351,10 +426,15 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       const body = parse(ticketRequestSchema, request.body ?? {});
       const userId = request.user?.id ?? null;
       const access = await authorize(deps, id, userId, "read", { shareToken: body.shareToken });
+      // Connecting as an editor takes an editor seat; plan limits make the ticket read-only.
+      const { limitedBy } = await planLimitsFor(deps.db, access, userId, nowOf(deps), {
+        claim: true,
+      });
+      const role = limitedBy !== null ? "viewer" : access.role;
       const { ticket, expiresAt } = await deps.tickets.issue({
         userId,
         boardId: id,
-        role: access.role,
+        role,
         linkId: access.via === "link" ? access.linkId : null,
         viaPublic: access.via === "public",
       });
@@ -367,7 +447,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
             set: { lastOpenedAt: sql`now()` },
           });
       }
-      return { ticket, role: access.role, expiresAt: expiresAt.toISOString() };
+      return { ticket, role, expiresAt: expiresAt.toISOString(), limitedBy };
     },
   );
 }

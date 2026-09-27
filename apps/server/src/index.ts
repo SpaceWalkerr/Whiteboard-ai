@@ -22,6 +22,8 @@ import { RedisLease } from "./cluster/lease";
 import { RedisRoomBus, type RoomBusMetrics } from "./cluster/roomBus";
 import { attachSyncServer } from "./sync/upgrade";
 import { loadPublicState } from "./interview/service";
+import { RazorpayProvider } from "./billing/razorpay";
+import type { BillingConfig } from "./billing/context";
 
 function readEnvOrExit(): ServerEnv {
   try {
@@ -76,6 +78,9 @@ async function main(): Promise<void> {
   if (!env.ANTHROPIC_API_KEY)
     logger.warn("ANTHROPIC_API_KEY not set; AI reviews and hints are disabled");
 
+  const billing = billingConfig(env);
+  if (!billing) logger.warn("RAZORPAY_KEY_ID not set; checkout is unavailable");
+
   const metrics = createSyncMetrics();
   // With Redis, this is one of several instances: rooms are shared through pub/sub and a
   // lease decides which instance persists each room. Without it (development), it's alone.
@@ -122,6 +127,7 @@ async function main(): Promise<void> {
         },
         maxElements: env.AI_REVIEW_MAX_ELEMENTS,
       },
+      billing,
     },
   });
   const sync = attachSyncServer(app.server, {
@@ -192,6 +198,25 @@ main().catch((error: unknown) => {
   );
   process.exit(1);
 });
+
+function billingConfig(env: ServerEnv): BillingConfig | undefined {
+  const {
+    RAZORPAY_KEY_ID: keyId,
+    RAZORPAY_KEY_SECRET: keySecret,
+    RAZORPAY_WEBHOOK_SECRET: webhookSecret,
+  } = env;
+  // The env schema requires all of them together.
+  if (!keyId || !keySecret || !webhookSecret) return undefined;
+  return {
+    provider: new RazorpayProvider({ keyId, keySecret, webhookSecret }),
+    providerPlanIds: {
+      pro_monthly: env.RAZORPAY_PLAN_PRO_MONTHLY ?? "",
+      pro_yearly: env.RAZORPAY_PLAN_PRO_YEARLY ?? "",
+      team_monthly: env.RAZORPAY_PLAN_TEAM_MONTHLY ?? "",
+      team_yearly: env.RAZORPAY_PLAN_TEAM_YEARLY ?? "",
+    },
+  };
+}
 
 function roomBusMetrics(metrics: SyncMetrics): RoomBusMetrics {
   return {

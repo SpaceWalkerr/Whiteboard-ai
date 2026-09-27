@@ -69,7 +69,7 @@ import {
   type InterviewRow,
 } from "../interview/service";
 import { authorize, refuseIfPrivate, shareTokenOf } from "./boards";
-import type { ApiDeps, Tx } from "./deps";
+import { nowOf, type ApiDeps, type Tx } from "./deps";
 import { parse } from "./validation";
 
 const boardParams = z.object({ id: z.uuid() });
@@ -90,8 +90,8 @@ export function registerInterviewRoutes(app: FastifyInstance, deps: ApiDeps): vo
   const { db } = deps;
 
   async function requireTeamPlan(userId: string): Promise<void> {
-    const entitlement = await getEntitlement(db, userId);
-    if (!entitlement.interviewMode)
+    const entitlement = await getEntitlement(db, userId, nowOf(deps));
+    if (!entitlement.limits.interviewMode)
       throw new PaymentRequiredError("PLAN_REQUIRED", PLAN_REQUIRED_MESSAGE);
   }
 

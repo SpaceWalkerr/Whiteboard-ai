@@ -1,10 +1,12 @@
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance } from "fastify";
+import { registerBillingRoutes } from "./billing";
 import { registerBoardExtraRoutes } from "./boardExtras";
 import { registerBoardRoutes } from "./boards";
 import { registerFolderRoutes } from "./folders";
 import { registerInterviewRoutes } from "./interviews";
 export { registerInternalRoutes } from "./internal";
+export { registerBillingWebhook } from "./billing";
 import type { ApiDeps } from "./deps";
 import { registerMeRoutes } from "./me";
 import { registerReviewRoutes } from "./reviews";
@@ -31,4 +33,5 @@ export async function registerApi(app: FastifyInstance, deps: ApiDeps): Promise<
   registerBoardExtraRoutes(app, deps);
   registerReviewRoutes(app, deps);
   registerInterviewRoutes(app, deps);
+  registerBillingRoutes(app, deps);
 }
