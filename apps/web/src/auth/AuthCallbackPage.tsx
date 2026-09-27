@@ -54,16 +54,18 @@ function completeSignIn(supabase: SupabaseClient, url: URL): Promise<string | nu
 
 /** /auth/callback — finishes magic-link and OAuth sign-in, then returns to where you were. */
 export function AuthCallbackPage() {
-  const { supabase } = useAuth();
+  const { getSupabase } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void completeSignIn(supabase, new URL(window.location.href)).then((message) => {
-      if (message) setError(message);
-      else void navigate(takeReturnTo(), { replace: true });
-    });
-  }, [supabase, navigate]);
+    void getSupabase()
+      .then((supabase) => completeSignIn(supabase, new URL(window.location.href)))
+      .then((message) => {
+        if (message) setError(message);
+        else void navigate(takeReturnTo(), { replace: true });
+      });
+  }, [getSupabase, navigate]);
 
   if (error) {
     return (

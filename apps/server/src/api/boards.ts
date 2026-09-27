@@ -14,6 +14,7 @@ import {
   and,
   boardMembers,
   boards,
+  boardSnapshots,
   boardVisits,
   eq,
   folders,
@@ -23,6 +24,7 @@ import {
 } from "@whiteboard/shared/db";
 import { can, resolveBoardAccess, type BoardAccess, type BoardAction } from "../access/boardAccess";
 import { checkFeature } from "@whiteboard/shared/entitlements";
+import { templateBySlug } from "@whiteboard/shared/templates";
 import { getEntitlement } from "../ai/entitlements";
 import {
   assertBoardSlot,
@@ -42,6 +44,7 @@ import {
   UnauthorizedError,
 } from "../errors";
 import { nowOf, type ApiDeps } from "./deps";
+import { templateBoardState } from "./templateBoard";
 import { parse } from "./validation";
 import { THUMBNAIL_URL_TTL_SECONDS } from "../storage/thumbnails";
 import { ensureWorkspace } from "./workspace";
@@ -230,6 +233,11 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const user = requireUser(request);
     const body = parse(createBoardSchema, request.body ?? {});
     const secret = body.private;
+    const template = body.templateId === undefined ? undefined : templateBySlug(body.templateId);
+    if (body.templateId !== undefined && !template) throw new BadRequestError("Unknown template.");
+    // The server can't write readable shapes into a board only the browser can decrypt.
+    if (template && secret)
+      throw new BadRequestError("A private board can't start from a template.");
     if (secret) {
       if (body.title !== undefined)
         throw new BadRequestError("A private board's title must be encrypted.");
@@ -262,7 +270,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
           id: secret?.id ?? crypto.randomUUID(),
           ownerId: user.id,
           orgId,
-          title: secret ? PRIVATE_BOARD_TITLE : (body.title ?? "Untitled board"),
+          title: secret ? PRIVATE_BOARD_TITLE : (body.title ?? template?.name ?? "Untitled board"),
           folderId: body.folderId ?? null,
           isPrivate: secret !== undefined,
           keyCheck: secret ? fromBase64(secret.keyCheck) : null,
@@ -285,6 +293,11 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
       await tx
         .insert(boardMembers)
         .values({ boardId: created.boardId, userId: user.id, role: "owner", addedBy: user.id });
+      if (template) {
+        // The board starts from one snapshot of the template (seq 0: no log yet).
+        const state = templateBoardState(template, user.id, nowOf(deps).getTime());
+        await tx.insert(boardSnapshots).values({ boardId: created.boardId, seqUpto: 0, state });
+      }
       await audit(tx, {
         action: "board.create",
         actorId: user.id,
@@ -293,6 +306,7 @@ export function registerBoardRoutes(app: FastifyInstance, deps: ApiDeps): void {
         targetType: "board",
         targetId: created.boardId,
         ...(created.isPrivate ? { metadata: { private: true } } : {}),
+        ...(template ? { metadata: { template: template.slug } } : {}),
         ip: request.ip,
       });
       return created;

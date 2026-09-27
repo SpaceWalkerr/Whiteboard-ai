@@ -1,5 +1,5 @@
 import { KEYRING_DB } from "@/features/board/e2e/keyring";
-import { LOCAL_CACHE_PREFIX } from "@/features/board/sync/localCache";
+import { LOCAL_CACHE_PREFIX } from "@/lib/deviceStorage";
 
 import { boardDetailSchema, type BoardDetail } from "@whiteboard/shared/api";
 

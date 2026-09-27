@@ -8,7 +8,7 @@ import { takeReturnTo } from "./localData";
 type Provider = "google" | "github";
 
 export function SignInPage() {
-  const { status, supabase } = useAuth();
+  const { status, getSupabase } = useAuth();
   const emailId = useId();
   const [email, setEmail] = useState("");
   const [sentTo, setSentTo] = useState<string | null>(null);
@@ -21,6 +21,7 @@ export function SignInPage() {
   const sendLink = async () => {
     setBusy(true);
     setError(null);
+    const supabase = await getSupabase();
     const { error: otpError } = await supabase.auth.signInWithOtp({
       email,
       options: { emailRedirectTo: redirectTo },
@@ -32,6 +33,7 @@ export function SignInPage() {
 
   const oauth = async (provider: Provider) => {
     setError(null);
+    const supabase = await getSupabase();
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo },

@@ -10,6 +10,7 @@ import {
   type Database,
   type SqlClient,
 } from "@whiteboard/shared/db";
+import { templateBySlug } from "@whiteboard/shared/templates";
 import { MemoryThumbnailStorage } from "../src/storage/thumbnails";
 import {
   createAuthUser,
@@ -187,6 +188,54 @@ describe("duplicate", () => {
   it("refuses to copy a board you can't see", async () => {
     const secret = await createBoard("Secret");
     expect((await api("POST", `/boards/${secret}/duplicate`, "bob")).status).toBe(403);
+  });
+});
+
+describe("templates", () => {
+  it("creates a board holding the template's shapes, owned by me", async () => {
+    const template = templateBySlug("url-shortener");
+    if (!template) throw new Error("missing template");
+    const res = await api("POST", "/boards", "alice", { templateId: "url-shortener" });
+    expect(res.status).toBe(201);
+    const board = res.body as { id: string; role: string; title: string };
+    expect(board).toMatchObject({ role: "owner", title: "URL shortener" });
+
+    const reader = ticketedClient(server, board.id, { token: token.alice });
+    clients.push(reader);
+    const shapes = reader.doc.getMap<Y.Map<unknown>>("shapes");
+    await waitFor(() => shapes.size === template.shapes.length, 10_000);
+    expect(shapes.get("lb")?.get("label")).toBe("Load balancer");
+    expect(shapes.get("lb")?.get("createdBy")).toBe(alice.id);
+
+    const [log] = await db
+      .select({ metadata: auditLogs.metadata })
+      .from(auditLogs)
+      .where(eq(auditLogs.boardId, board.id));
+    expect(log?.metadata).toMatchObject({ template: "url-shortener" });
+  });
+
+  it("uses my title when I give one", async () => {
+    const res = await api("POST", "/boards", "alice", {
+      templateId: "rate-limiter",
+      title: "Mock interview #2",
+    });
+    expect(res.body).toMatchObject({ title: "Mock interview #2" });
+  });
+
+  it("refuses unknown templates and private boards from a template", async () => {
+    const unknown = await api("POST", "/boards", "alice", { templateId: "no-such-template" });
+    expect(unknown.status).toBe(400);
+    const junk = await api("POST", "/boards", "alice", { templateId: "../../etc" });
+    expect(junk.status).toBe(400);
+    const privateFromTemplate = await api("POST", "/boards", "alice", {
+      templateId: "url-shortener",
+      private: {
+        id: crypto.randomUUID(),
+        keyCheck: Buffer.from("x".repeat(40)).toString("base64"),
+        encryptedTitle: Buffer.from("y".repeat(40)).toString("base64"),
+      },
+    });
+    expect(privateFromTemplate.status).toBe(400);
   });
 });
 

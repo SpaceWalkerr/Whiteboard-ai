@@ -11,7 +11,11 @@ export interface AuthState {
   /** Our profile (after the server bootstrapped the account). */
   profile: Profile | null;
   api: ApiClient;
-  supabase: SupabaseClient;
+  /**
+   * The Supabase client (sign-in only). Loaded on demand so public pages don't ship it
+   * before they are interactive; call it from effects and event handlers, never in render.
+   */
+  getSupabase: () => Promise<SupabaseClient>;
   /** Signs out here; `everywhere` also revokes sessions on all other devices. */
   signOut: (everywhere?: boolean) => Promise<void>;
 }

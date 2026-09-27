@@ -1,7 +1,8 @@
 import { IndexeddbPersistence } from "y-indexeddb";
 import type { BoardStore } from "@whiteboard/shared/board";
+import { LOCAL_CACHE_PREFIX } from "@/lib/deviceStorage";
 
-export const LOCAL_CACHE_PREFIX = "whiteboard:board:";
+export { LOCAL_CACHE_PREFIX };
 
 /** IndexedDB database name for a board's local copy. */
 export function localCacheName(boardId: string): string {

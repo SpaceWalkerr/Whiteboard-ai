@@ -191,6 +191,7 @@ const webBase = {
   VITE_WS_URL: "ws://localhost:4000",
   VITE_SUPABASE_URL: "https://project.supabase.co",
   VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_0123456789abcdef",
+  VITE_SITE_URL: "https://whiteboard.example",
 };
 
 describe("loadEnv(webEnvSchema)", () => {
@@ -231,6 +232,25 @@ describe("loadEnv(webEnvSchema)", () => {
       "VITE_WS_URL",
       "VITE_SUPABASE_URL",
       "VITE_SUPABASE_PUBLISHABLE_KEY",
+      "VITE_SITE_URL",
     ]);
+  });
+
+  it("takes the site URL as a bare origin", () => {
+    expect(
+      loadEnv(webEnvSchema, { ...webBase, VITE_SITE_URL: "https://a.example/" }).VITE_SITE_URL,
+    ).toBe("https://a.example");
+    const error = captureError(() =>
+      loadEnv(webEnvSchema, { ...webBase, VITE_SITE_URL: "https://a.example/app" }),
+    );
+    expect(error.issues).toEqual([
+      { variable: "VITE_SITE_URL", problem: "must be an http(s) origin without a path" },
+    ]);
+  });
+
+  it("leaves analytics off without a PostHog key", () => {
+    const env = loadEnv(webEnvSchema, webBase);
+    expect(env.VITE_POSTHOG_KEY).toBeUndefined();
+    expect(env.VITE_POSTHOG_HOST).toBe("https://eu.i.posthog.com");
   });
 });

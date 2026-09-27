@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-ssr/
 .turbo/
 coverage/
 *.tsbuildinfo
@@ -26,3 +27,4 @@ loadtest/.data/
 
 # AI review eval results (per run; the score is recorded in PROGRESS.md)
 apps/server/eval/results/
+lighthouse-report/

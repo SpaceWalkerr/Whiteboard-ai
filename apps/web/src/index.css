@@ -82,3 +82,63 @@
     @apply bg-background text-foreground antialiased;
   }
 }
+
+/* Long-form text on the public site (docs, legal pages, template write-ups). */
+@layer components {
+  .prose-site {
+    @apply leading-7;
+  }
+  .prose-site > h1 {
+    @apply mb-4 text-4xl font-bold tracking-tight;
+  }
+  .prose-site h2 {
+    @apply mt-10 mb-3 scroll-mt-6 text-2xl font-semibold tracking-tight;
+  }
+  .prose-site h3 {
+    @apply mt-6 mb-2 text-lg font-semibold;
+  }
+  .prose-site p,
+  .prose-site ul,
+  .prose-site ol,
+  .prose-site dl,
+  .prose-site table {
+    @apply my-4;
+  }
+  .prose-site ul {
+    @apply list-disc pl-6;
+  }
+  .prose-site ol {
+    @apply list-decimal pl-6;
+  }
+  .prose-site li {
+    @apply my-1;
+  }
+  .prose-site dt {
+    @apply mt-4 font-semibold;
+  }
+  .prose-site dd {
+    @apply text-muted-foreground;
+  }
+  .prose-site a {
+    @apply underline underline-offset-4;
+  }
+  .prose-site table {
+    @apply w-full border-collapse text-sm;
+  }
+  .prose-site th,
+  .prose-site td {
+    @apply border px-3 py-2 text-left align-top;
+  }
+  .prose-site th {
+    @apply bg-muted font-semibold;
+  }
+  .prose-site kbd {
+    @apply rounded border bg-muted px-1.5 py-0.5 font-mono text-xs;
+  }
+  .prose-site code {
+    @apply rounded bg-muted px-1 py-0.5 font-mono text-sm;
+  }
+  .prose-site .not-prose dt {
+    @apply mt-0;
+  }
+}

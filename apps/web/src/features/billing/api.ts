@@ -74,10 +74,13 @@ export function useBillingSummary(enabled = true) {
   });
 }
 
+/** The plans catalog. Prerendered pages seed it with the prices fetched at build time. */
+export const CATALOG_KEY = ["billing", "catalog"] as const;
+
 export function useCatalog() {
   const { api } = useAuth();
   return useQuery({
-    queryKey: ["billing", "catalog"],
+    queryKey: CATALOG_KEY,
     queryFn: () => billingApi(api).catalog(),
     staleTime: 10 * 60_000,
   });

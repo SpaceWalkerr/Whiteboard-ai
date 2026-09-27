@@ -4,7 +4,8 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/((?!assets/)[^.]*)", "destination": "/index.html" }],
+  "cleanUrls": true,
+  "rewrites": [{ "source": "/((?!assets/)[^.]*)", "destination": "/app.html" }],
   "headers": [
     {
       "source": "/(sw.js|registerSW.js)",

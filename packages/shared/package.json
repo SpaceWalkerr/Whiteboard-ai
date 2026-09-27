@@ -17,7 +17,8 @@
     "./interview": "./src/interview/index.ts",
     "./replay": "./src/replay/index.ts",
     "./entitlements": "./src/entitlements/index.ts",
-    "./billing": "./src/billing/index.ts"
+    "./billing": "./src/billing/index.ts",
+    "./templates": "./src/templates/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings=0",

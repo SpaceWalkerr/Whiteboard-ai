@@ -16,6 +16,22 @@ export const webEnvSchema = z.object({
   /** Supabase publishable (anon) key — public by design; RLS keeps our tables closed to it. */
   VITE_SUPABASE_PUBLISHABLE_KEY: z.string().min(20),
   /**
+   * Public origin of the website (production: the custom domain). Canonical URLs, the sitemap
+   * and Open Graph tags are absolute URLs on this origin.
+   */
+  VITE_SITE_URL: z
+    .url()
+    .refine((value) => /^https?:\/\/[^/]+\/?$/.test(value), {
+      message: "must be an http(s) origin without a path",
+    })
+    .transform((value) => value.replace(/\/$/, "")),
+  /**
+   * Product analytics (PostHog). Optional: without a key nothing is loaded. Even with one,
+   * PostHog loads only after the visitor accepts analytics cookies.
+   */
+  VITE_POSTHOG_KEY: z.string().min(1).optional(),
+  VITE_POSTHOG_HOST: z.url().default("https://eu.i.posthog.com"),
+  /**
    * Exposes window.__whiteboard test hooks (E2E and performance runs only). Never set this for
    * a deployed build.
    */

@@ -83,6 +83,15 @@ export const createBoardSchema = z.object({
       encryptedTitle: envelopeBase64Schema,
     })
     .optional(),
+  /**
+   * Start from a public template (`@whiteboard/shared/templates` slug). Checked against the
+   * catalog on the server; the pattern only keeps junk out of logs.
+   */
+  templateId: z
+    .string()
+    .max(64)
+    .regex(/^[a-z0-9-]+$/)
+    .optional(),
 });
 export const updateBoardSchema = z
   .object({

@@ -157,6 +157,11 @@ describe("board limit (Free: 3) at the API", () => {
       (await server.request("POST", `/boards/${nth(ids, 0)}/duplicate`, { token: owner.token }))
         .status,
     ).toBe(402);
+    const fromTemplate = await server.request("POST", "/boards", {
+      token: owner.token,
+      body: { templateId: "url-shortener" },
+    });
+    expect(fromTemplate.body).toMatchObject({ error: { code: "BOARD_LIMIT" } });
 
     // Trash frees a slot; restoring it again while at the limit is refused.
     expect(
