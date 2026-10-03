@@ -1,5 +1,6 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import Fastify, { LogController } from "fastify";
 import type { Registry } from "prom-client";
 import type { Logger } from "pino";
@@ -9,6 +10,14 @@ import { runReadinessChecks, type DependencyCheck } from "./http/readiness";
 import { registerApi, registerBillingWebhook, registerInternalRoutes } from "./api";
 import type { ApiDeps } from "./api/deps";
 import { registerRequestAuth } from "./auth/requestAuth";
+import { bearerMatches } from "./http/bearer";
+import { API_SECURITY_HEADERS } from "./http/securityHeaders";
+
+/**
+ * Largest request body accepted anywhere unless a route sets its own (thumbnails, AI review of
+ * a private board's graph). Everything else is small JSON; a lower cap limits memory abuse.
+ */
+export const DEFAULT_BODY_LIMIT = 256 * 1024;
 
 export interface AppOptions {
   logger: Logger;
@@ -34,11 +43,21 @@ export function buildApp(options: AppOptions) {
         ? (_address: string, hop: number) => hop < (options.trustProxy ?? 0)
         : false,
     genReqId: () => randomUUID(),
+    bodyLimit: DEFAULT_BODY_LIMIT,
     logController: new LogController({
       // Health probes hit these every few seconds; logging them would drown real traffic.
       disableRequestLogging: (request) =>
         request.url === "/healthz" || request.url === "/readyz" || request.url === "/metrics",
     }),
+  });
+
+  // Set on request, so streams that write the raw response (review progress) carry them too.
+  app.addHook("onRequest", async (_request, reply) => {
+    reply.headers(API_SECURITY_HEADERS);
+  });
+  app.addHook("onSend", async (_request, reply, payload) => {
+    if (!reply.hasHeader("cache-control")) reply.header("Cache-Control", "no-store");
+    return payload;
   });
 
   void app.register(cors, {
@@ -76,12 +95,18 @@ export function buildApp(options: AppOptions) {
   // otherwise a Redis blip would get every instance restarted at once.
   app.get("/healthz", (): HealthResponse => ({ status: "ok" }));
 
-  // Readiness: this instance can serve traffic (Postgres and Redis reachable).
+  // Readiness: this instance can serve traffic (Postgres and Redis reachable). Unauthenticated
+  // and public, so concurrent probes share one run of the checks: a flood of /readyz requests
+  // can't turn into a flood of database queries.
+  let readiness: ReturnType<typeof runReadinessChecks> | null = null;
   app.get("/readyz", async (request, reply) => {
-    const { body, failures } = await runReadinessChecks(
+    readiness ??= runReadinessChecks(
       options.readinessChecks,
       options.readinessTimeoutMs ?? 1000,
-    );
+    ).finally(() => {
+      readiness = null;
+    });
+    const { body, failures } = await readiness;
     for (const { name, error } of failures) {
       request.log.warn({ err: error, dependency: name }, "readiness check failed");
     }
@@ -93,18 +118,26 @@ export function buildApp(options: AppOptions) {
     // The API lives in its own scope: session verification (request.user) and rate limits
     // apply to API routes only, never to health checks or metrics.
     void app.register(async (scope) => {
+      // CSRF defence in depth. The API authenticates with a bearer token, never a cookie, so a
+      // cross-site form or no-cors fetch carries no credentials. On top of that, only the
+      // content types a cross-site request can't send without a CORS preflight are parsed:
+      // text/plain (Fastify's default) is removed, and url-encoded/multipart forms have no
+      // parser, so such requests get 415 before any route code runs.
+      scope.removeContentTypeParser("text/plain");
       registerRequestAuth(scope, api.verifier);
       await registerApi(scope, api);
     });
-    // Scheduled-job endpoints: CRON_SECRET only, no user session.
+    // Scheduled-job endpoints: CRON_SECRET only, no user session. Rate limited per IP so the
+    // secret can't be brute-forced and a leaked one can't be used to hammer the database.
     void app.register(async (scope) => {
+      await scope.register(rateLimit, publicRateLimit(api, 30, "whiteboard:rate:internal:"));
       registerInternalRoutes(scope, api);
-      await Promise.resolve();
     });
-    // Payment provider webhooks: signature only, raw body, no user session.
+    // Payment provider webhooks: signature only, raw body, no user session. The limit is far
+    // above Razorpay's delivery rate; it stops floods of forged events (each costs an HMAC).
     void app.register(async (scope) => {
+      await scope.register(rateLimit, publicRateLimit(api, 600, "whiteboard:rate:webhook:"));
       registerBillingWebhook(scope, api);
-      await Promise.resolve();
     });
   }
 
@@ -124,11 +157,14 @@ export function buildApp(options: AppOptions) {
   return app;
 }
 
-/** Constant-time comparison so the token can't be guessed byte by byte from timings. */
-function bearerMatches(header: string | undefined, token: string): boolean {
-  const provided = Buffer.from(header?.startsWith("Bearer ") ? header.slice(7) : "");
-  const expected = Buffer.from(token);
-  return provided.length === expected.length && timingSafeEqual(provided, expected);
+/** Per-IP limit for routes without a user session (shared across instances via Redis). */
+function publicRateLimit(api: ApiDeps, max: number, nameSpace: string) {
+  return {
+    global: true,
+    max,
+    timeWindow: "1 minute",
+    ...(api.redis ? { redis: api.redis, nameSpace, skipOnError: true } : {}),
+  };
 }
 
 export type App = ReturnType<typeof buildApp>;

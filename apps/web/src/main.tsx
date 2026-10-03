@@ -1,3 +1,4 @@
+import "./lib/zodConfig";
 import { QueryClient } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";

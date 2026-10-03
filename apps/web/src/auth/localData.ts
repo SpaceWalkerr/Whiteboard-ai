@@ -76,8 +76,16 @@ export function forgetBoardDetail(boardId: string): void {
 }
 
 /** Where to go after signing in (only same-origin paths, never full URLs). */
+/**
+ * Only same-origin paths may be returned to after sign-in (no open redirect). Browsers treat
+ * `\` like `/`, so `/\evil.test` would be the protocol-relative `//evil.test`.
+ */
+export function isSafeReturnPath(path: string): boolean {
+  return path.startsWith("/") && !path.startsWith("//") && !path.includes("\\");
+}
+
 export function rememberReturnTo(path: string): void {
-  if (!path.startsWith("/") || path.startsWith("//")) return;
+  if (!isSafeReturnPath(path)) return;
   try {
     sessionStorage.setItem(RETURN_TO_KEY, path);
   } catch {
@@ -89,7 +97,7 @@ export function takeReturnTo(): string {
   try {
     const value = sessionStorage.getItem(RETURN_TO_KEY);
     sessionStorage.removeItem(RETURN_TO_KEY);
-    if (value?.startsWith("/") && !value.startsWith("//")) return value;
+    if (value && isSafeReturnPath(value)) return value;
   } catch {
     // ignore
   }

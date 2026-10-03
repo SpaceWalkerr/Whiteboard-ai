@@ -21,7 +21,9 @@
     "scale:local": "bash infra/scale/run-local.sh",
     "scale:up": "docker compose -f docker-compose.scale.yml up --build",
     "load:seed": "pnpm --filter @whiteboard/server load:seed",
-    "load:build": "pnpm --filter @whiteboard/loadtest build"
+    "load:build": "pnpm --filter @whiteboard/loadtest build",
+    "security:secrets": "node scripts/secret-scan.mjs",
+    "security:audit": "pnpm audit --prod --audit-level=high"
   },
   "devDependencies": {
     "@whiteboard/config": "workspace:*",

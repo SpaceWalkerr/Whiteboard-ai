@@ -1,4 +1,5 @@
 import type { PostHog } from "posthog-js";
+import { scrubFragments } from "@/lib/privacy";
 import type { ConsentChoice } from "./consent";
 
 export interface AnalyticsConfig {
@@ -34,6 +35,12 @@ export async function applyAnalyticsConsent(
         disable_session_recording: true,
         autocapture: false,
         person_profiles: "identified_only",
+        // No scripts from PostHog's CDN (surveys, toolbar, remote config): the CSP allows
+        // scripts from our own origin only.
+        disable_external_dependency_loading: true,
+        // Page URLs can carry a private board's key or an interview token in the fragment
+        // ($current_url, $referrer, initial URLs…): drop fragments before anything is sent.
+        before_send: (event) => (event ? scrubFragments(event) : event),
       });
       return posthog;
     });

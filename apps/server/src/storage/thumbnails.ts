@@ -1,3 +1,5 @@
+import { createSafeFetch } from "../http/safeFetch";
+
 /**
  * Board thumbnails in a private Supabase Storage bucket. Only apps/server touches the bucket
  * (with the service-role key); browsers get short-lived signed URLs.
@@ -18,11 +20,16 @@ export function thumbnailPath(boardId: string): string {
 
 /** Supabase Storage over its REST API (no extra SDK on the server). */
 export class SupabaseThumbnailStorage implements ThumbnailStorage {
+  private readonly fetch: typeof fetch;
+
   constructor(
     private readonly supabaseUrl: string,
     private readonly serviceRoleKey: string,
     private readonly bucket = THUMBNAIL_BUCKET,
-  ) {}
+  ) {
+    // Only ever our own Supabase project (the service-role key goes with every request).
+    this.fetch = createSafeFetch([supabaseUrl]);
+  }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
@@ -33,7 +40,7 @@ export class SupabaseThumbnailStorage implements ThumbnailStorage {
   }
 
   async put(path: string, png: Uint8Array): Promise<void> {
-    const res = await fetch(
+    const res = await this.fetch(
       `${this.supabaseUrl}/storage/v1/object/${this.bucket}/${encodeURIComponent(path)}`,
       {
         method: "POST",
@@ -50,7 +57,7 @@ export class SupabaseThumbnailStorage implements ThumbnailStorage {
 
   async remove(paths: string[]): Promise<void> {
     if (paths.length === 0) return;
-    const res = await fetch(`${this.supabaseUrl}/storage/v1/object/${this.bucket}`, {
+    const res = await this.fetch(`${this.supabaseUrl}/storage/v1/object/${this.bucket}`, {
       method: "DELETE",
       headers: this.headers({ "content-type": "application/json" }),
       body: JSON.stringify({ prefixes: paths }),
@@ -61,7 +68,7 @@ export class SupabaseThumbnailStorage implements ThumbnailStorage {
   async signedUrls(paths: string[], expiresInSeconds: number): Promise<Map<string, string>> {
     const urls = new Map<string, string>();
     if (paths.length === 0) return urls;
-    const res = await fetch(`${this.supabaseUrl}/storage/v1/object/sign/${this.bucket}`, {
+    const res = await this.fetch(`${this.supabaseUrl}/storage/v1/object/sign/${this.bucket}`, {
       method: "POST",
       headers: this.headers({ "content-type": "application/json" }),
       body: JSON.stringify({ expiresIn: expiresInSeconds, paths }),

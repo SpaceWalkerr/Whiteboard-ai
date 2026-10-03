@@ -11,6 +11,8 @@ import {
   SYNC_SUBPROTOCOL,
 } from "@whiteboard/shared/sync";
 import { LocalLease, type PersistenceLease } from "../cluster/lease";
+import { clientIp } from "../http/clientIp";
+import type { WindowLimiter } from "../http/windowLimiter";
 import { LocalRoomBus, type RoomBus } from "../cluster/roomBus";
 import type { PublicInterviewState } from "@whiteboard/shared/interview";
 import type { RevocationBus, RevocationEvent } from "../revocation/bus";
@@ -52,6 +54,18 @@ export interface SyncServerOptions {
    * the database. Sent to each socket when it joins and whenever the interview changes.
    */
   interviewState?: ((boardId: string) => Promise<PublicInterviewState | null>) | undefined;
+  /**
+   * Abuse limits on opening sockets, checked before any token or database work: upgrades per
+   * client IP (across instances) and open sockets per signed-in user (on this instance).
+   */
+  upgradeLimits?: UpgradeLimits | undefined;
+}
+
+export interface UpgradeLimits {
+  perIp: WindowLimiter;
+  /** Proxy hops trusted for X-Forwarded-For (TRUST_PROXY). */
+  trustProxy: number;
+  maxConnectionsPerUser: number;
 }
 
 export interface ClusterOptions {
@@ -100,6 +114,11 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
   });
   let accepting = true;
   const connections = new Set<RoomConnection>();
+  const countForUser = (userId: string) => {
+    let count = 0;
+    for (const connection of connections) if (connection.identity.userId === userId) count += 1;
+    return count;
+  };
 
   const reject = (socket: Duplex, status: number, reason: string, metric: string) => {
     metrics.rejected.inc({ reason: metric });
@@ -139,65 +158,85 @@ export function attachSyncServer(server: Server, options: SyncServerOptions): Sy
       return;
     }
 
-    options.authorize(request, boardId).then(
-      (result) => {
-        if (!result.ok) {
-          reject(
-            socket,
-            result.status,
-            result.status === 401 ? "Unauthorized" : "Forbidden",
-            "unauthorized",
-          );
-          return;
-        }
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          const room = rooms.acquire(boardId, result.identity.encrypted);
-          const connectionOptions = {
-            rateLimiter: new TokenBucket(options.rateLimit.burst, options.rateLimit.perSecond),
-            byteLimiter: new TokenBucket(
-              options.rateLimit.bytesBurst,
-              options.rateLimit.bytesPerSecond,
-            ),
-            metrics,
-            logger,
-            maxBufferedBytes: options.maxBufferedBytes ?? 4 * 1024 * 1024,
-            onClose: (closed: RoomConnection) => {
-              connections.delete(closed);
-              metrics.connectionsActive.set(connections.size);
-              rooms.leave(closed.room, closed);
-            },
-          };
-          let connection: RoomConnection;
-          if (room instanceof EncryptedRoom)
-            connection = new EncryptedConnection(ws, room, result.identity, connectionOptions);
-          else if (room instanceof Room)
-            connection = new SyncConnection(ws, room, result.identity, connectionOptions);
-          else throw new Error("unknown room kind");
-          rooms.join(room, connection);
-          logger.info(
-            {
-              boardId,
-              userId: result.identity.userId,
-              role: result.identity.role,
-              encrypted: result.identity.encrypted,
-            },
-            "sync connection opened",
-          );
-          connections.add(connection);
-          metrics.connectionsActive.set(connections.size);
-          connection.start();
-          // Interviews never run on private boards.
-          if (!result.identity.encrypted)
-            void room.ready.then((load) => {
-              if (load.ok) void sendInterviewState(boardId, [connection]);
-            });
-        });
-      },
-      (error: unknown) => {
-        logger.error({ err: error, boardId }, "authorization failed");
-        reject(socket, 500, "Internal Server Error", "error");
-      },
-    );
+    const limits = options.upgradeLimits;
+    const allowed = limits
+      ? limits.perIp.hit(clientIp(request, limits.trustProxy))
+      : Promise.resolve(true);
+    allowed
+      .then(async (withinLimit) => {
+        if (!withinLimit) return "rate_limited" as const;
+        return options.authorize(request, boardId);
+      })
+      .then(
+        (result) => {
+          if (result === "rate_limited") {
+            logger.warn({ boardId }, "websocket upgrade rejected: too many upgrades from this IP");
+            reject(socket, 429, "Too Many Requests", "rate_limited");
+            return;
+          }
+          if (!result.ok) {
+            reject(
+              socket,
+              result.status,
+              result.status === 401 ? "Unauthorized" : "Forbidden",
+              "unauthorized",
+            );
+            return;
+          }
+          const userId = result.identity.userId;
+          if (limits && userId !== null && countForUser(userId) >= limits.maxConnectionsPerUser) {
+            logger.warn({ boardId, userId }, "websocket upgrade rejected: too many open sockets");
+            reject(socket, 429, "Too Many Requests", "too_many_sockets");
+            return;
+          }
+          wss.handleUpgrade(request, socket, head, (ws) => {
+            const room = rooms.acquire(boardId, result.identity.encrypted);
+            const connectionOptions = {
+              rateLimiter: new TokenBucket(options.rateLimit.burst, options.rateLimit.perSecond),
+              byteLimiter: new TokenBucket(
+                options.rateLimit.bytesBurst,
+                options.rateLimit.bytesPerSecond,
+              ),
+              metrics,
+              logger,
+              maxBufferedBytes: options.maxBufferedBytes ?? 4 * 1024 * 1024,
+              onClose: (closed: RoomConnection) => {
+                connections.delete(closed);
+                metrics.connectionsActive.set(connections.size);
+                rooms.leave(closed.room, closed);
+              },
+            };
+            let connection: RoomConnection;
+            if (room instanceof EncryptedRoom)
+              connection = new EncryptedConnection(ws, room, result.identity, connectionOptions);
+            else if (room instanceof Room)
+              connection = new SyncConnection(ws, room, result.identity, connectionOptions);
+            else throw new Error("unknown room kind");
+            rooms.join(room, connection);
+            logger.info(
+              {
+                boardId,
+                userId: result.identity.userId,
+                role: result.identity.role,
+                encrypted: result.identity.encrypted,
+              },
+              "sync connection opened",
+            );
+            connections.add(connection);
+            metrics.connectionsActive.set(connections.size);
+            connection.start();
+            // Interviews never run on private boards.
+            if (!result.identity.encrypted)
+              void room.ready.then((load) => {
+                if (load.ok) void sendInterviewState(boardId, [connection]);
+              });
+          });
+        },
+        (error: unknown) => {
+          logger.error({ err: error, boardId }, "authorization failed");
+          reject(socket, 500, "Internal Server Error", "error");
+        },
+      );
   });
 
   /** Loads the board's public interview state and sends it to the given sockets. */

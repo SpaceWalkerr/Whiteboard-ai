@@ -126,4 +126,24 @@ describe("review contract", () => {
     ).toBe("URL shortener");
     expect(reviewRequestSchema.safeParse({ requirements: "x".repeat(2001) }).success).toBe(false);
   });
+
+  it("bounds a private board's graph sent by the browser, and accepts a real one", () => {
+    const graph = extractGraph(
+      board()
+        .add("service", "api", { label: "API" })
+        .add("database", "db", { label: "DB" })
+        .arrow("api", "db", { id: "a1" })
+        .build(),
+    );
+    const request = (g: unknown) => ({ private: { graph: g, consent: true, store: false } });
+    expect(reviewRequestSchema.safeParse(request(graph)).success).toBe(true);
+    const node = graph.nodes[0];
+    if (!node) throw new Error("fixture has no nodes");
+    const tooLong = { ...graph, nodes: [{ ...node, label: "x".repeat(501) }] };
+    expect(reviewRequestSchema.safeParse(request(tooLong)).success).toBe(false);
+    const tooMany = { ...graph, nodes: Array.from({ length: 5001 }, () => node) };
+    expect(reviewRequestSchema.safeParse(request(tooMany)).success).toBe(false);
+    const hugeCount = { ...graph, nodes: [{ ...node, props: { ...node.props, instances: 1e9 } }] };
+    expect(reviewRequestSchema.safeParse(request(hugeCount)).success).toBe(false);
+  });
 });

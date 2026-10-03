@@ -357,10 +357,12 @@ describe("security across instances", () => {
     a.awareness.setLocalState(presence(victim, 1));
     await waitFor(() => two.server.sync.rooms.get(boardId)?.remoteAwareness.has(777001) === true);
 
-    // Same Yjs client id, different signed-in user, on the other instance.
-    const attacker = client(two, boardId, crypto.randomUUID(), 777001);
+    // Same Yjs client id, different signed-in user (showing their own id), on the other
+    // instance.
+    const attackerId = crypto.randomUUID();
+    const attacker = client(two, boardId, attackerId, 777001);
     await waitFor(() => connected(attacker));
-    attacker.awareness.setLocalState(presence(victim, 999));
+    attacker.awareness.setLocalState(presence(attackerId, 999));
     await waitForAsync(
       async () => (await count(two.server.metrics.messages, { type: "awareness_spoofed" })) > 0,
     );

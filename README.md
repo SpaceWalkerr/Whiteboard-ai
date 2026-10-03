@@ -148,9 +148,12 @@ loadtest/         k6 scenarios, Node load generator and latency probe (docs/scal
 infra/scale/      nginx config + native runner for the 2-instance scale stack
 docker-compose.scale.yml  The same stack in Docker (scale/load tests only)
 docs/             Design notes (scaling.md: multi-instance sync, measurements;
-                  security.md: end-to-end encrypted private boards, threat model)
+                  security.md: OWASP Top 10 walkthrough, CSP/headers, rate and size
+                  limits, dependency + secret scans, end-to-end encrypted private boards)
 render.yaml       Render Blueprint (stub until Phase 13)
-.github/workflows CI: lint, typecheck, build, tests (Supabase Postgres image), Playwright smoke
+.github/workflows CI: lint, typecheck, build, tests (Supabase Postgres image), Playwright smoke,
+                  dependency audit + secret scan (gitleaks)
+scripts/          secret-scan.mjs: credential scan of the index and full git history
 ```
 
 ## Environment variables

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { deleteE2EUsers } from "./auth";
 import { ensureSignedIn } from "./helpers";
 

@@ -4,6 +4,12 @@ import { shapeIdSchema } from "../board/shapes";
 const finite = z.number();
 
 /**
+ * Presence ids of people who aren't signed in (public links). Signed-in people present with
+ * their user id; the sync server rejects any other id (no impersonation).
+ */
+export const GUEST_PRESENCE_PREFIX = "guest-";
+
+/**
  * What each client publishes through the awareness protocol. Validated on receipt (server
  * and clients) — awareness is untrusted input like any other network message.
  */

@@ -143,7 +143,7 @@ describe("sync server", () => {
     );
 
     a.awareness.setLocalState({
-      user: { id: "u1", name: "Ada", color: "#1d4ed8" },
+      user: { id: "guest-u1", name: "Ada", color: "#1d4ed8" },
       cursor: { x: 1, y: 2 },
       selection: [],
       viewport: null,
@@ -162,7 +162,7 @@ describe("sync server", () => {
       () => a.provider.getStatus() === "connected" && b.provider.getStatus() === "connected",
     );
 
-    a.awareness.setLocalState({ user: { id: "u1", name: "", color: "blue" } });
+    a.awareness.setLocalState({ user: { id: "guest-u1", name: "", color: "blue" } });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(b.awareness.getStates().has(a.doc.clientID)).toBe(false);
   });
@@ -250,7 +250,7 @@ describe("sync server", () => {
       () => a.provider.getStatus() === "connected" && b.provider.getStatus() === "connected",
     );
     a.awareness.setLocalState({
-      user: { id: "u1", name: "Ada", color: "#1d4ed8" },
+      user: { id: "guest-u1", name: "Ada", color: "#1d4ed8" },
       cursor: null,
       selection: [],
       viewport: null,
@@ -262,7 +262,7 @@ describe("sync server", () => {
     const forger = new Awareness(new Y.Doc());
     forger.clientID = a.doc.clientID;
     forger.setLocalState({
-      user: { id: "u2", name: "Mallory", color: "#000000" },
+      user: { id: "guest-u2", name: "Mallory", color: "#000000" },
       cursor: null,
       selection: [],
       viewport: null,
@@ -274,6 +274,57 @@ describe("sync server", () => {
       { user: { name: string } } | undefined;
     expect(seen?.user.name).toBe("Ada");
     ws.close();
+  });
+
+  it("drops presence that impersonates someone else's user id", async () => {
+    const signedIn = "0b8a4a57-5b9c-4d8e-9d9e-0f1e2d3c4b5a";
+    // Sockets with ?user=<id> are that signed-in user; others are anonymous guests.
+    const s = await server({
+      authorize: (request) => {
+        const user = new URL(request.url ?? "/", "http://x").searchParams.get("user");
+        return Promise.resolve({
+          ok: true,
+          identity: {
+            userId: user,
+            role: "editor",
+            linkId: null,
+            viaPublic: false,
+            encrypted: false,
+          },
+        });
+      },
+    });
+    const observer = client(s.wsUrl);
+    await waitFor(() => observer.provider.getStatus() === "connected");
+    const { Awareness, encodeAwarenessUpdate } = await import("y-protocols/awareness");
+    const send = async (query: string, id: string, name: string) => {
+      const fake = new Awareness(new Y.Doc());
+      fake.setLocalState({
+        user: { id, name, color: "#000000" },
+        cursor: null,
+        selection: [],
+        viewport: null,
+      });
+      const ws = await rawSocket(s.wsUrl, `${BOARD}${query}`);
+      ws.send(encodeAwarenessMessage(encodeAwarenessUpdate(fake, [fake.clientID])));
+      return { ws, clientId: fake.clientID };
+    };
+
+    // An anonymous socket showing a member's id, and a signed-in one showing someone else's.
+    const anonymous = await send("", signedIn, "Fake member");
+    const other = await send(`?user=${crypto.randomUUID()}`, signedIn, "Fake member");
+    // The real user, and a guest with a guest id, are shown.
+    const real = await send(`?user=${signedIn}`, signedIn, "Real member");
+    const guest = await send("", "guest-123", "Guest");
+    await waitFor(
+      () =>
+        observer.awareness.getStates().has(real.clientId) &&
+        observer.awareness.getStates().has(guest.clientId),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(observer.awareness.getStates().has(anonymous.clientId)).toBe(false);
+    expect(observer.awareness.getStates().has(other.clientId)).toBe(false);
+    for (const { ws } of [anonymous, other, real, guest]) ws.close();
   });
 
   it("exposes Prometheus metrics behind the token", async () => {

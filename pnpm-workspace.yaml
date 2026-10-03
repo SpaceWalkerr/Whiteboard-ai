@@ -4,6 +4,11 @@ packages:
   - loadtest
 
 # pnpm 10 blocks dependency install scripts by default; allow only the ones we need.
+# Security patches for transitive dependencies (see docs/security.md → Dependencies).
+overrides:
+  # GHSA: unzipSync infinite loop on malformed ZIP64 (satori, build-time OG images).
+  "fflate@>=0.7.0 <0.7.5": "^0.7.5"
+
 onlyBuiltDependencies:
   - esbuild
 

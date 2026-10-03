@@ -1,5 +1,5 @@
 import { deleteE2EUsers } from "./auth";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { isOnOutline, resolveArrow } from "../src/features/board/geometry/arrow";
 import { arrows, center, drag, modKey, openBoard, shapes, toScreen } from "./helpers";
 

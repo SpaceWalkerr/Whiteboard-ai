@@ -8,10 +8,12 @@ import {
   CLOSE_CODES,
   encodeAwarenessMessage,
   encodeMessage,
+  GUEST_PRESENCE_PREFIX,
   MESSAGE_AWARENESS,
   MESSAGE_SYNC,
   readAwarenessEntries,
   toUint8Array,
+  type Presence,
 } from "@whiteboard/shared/sync";
 import { can } from "../access/boardAccess";
 import type { ConnectionIdentity } from "./auth";
@@ -237,6 +239,20 @@ export class SyncConnection extends RoomConnection<Room> {
     return this.identity.userId !== null && state?.user?.id === this.identity.userId;
   }
 
+  /**
+   * Presence must say who the socket really is: a signed-in socket may only show its own user
+   * id, an anonymous one only a guest id. Otherwise anyone could appear as another member
+   * (their cursor colour, follow target and "who is here" list). A null state means "left".
+   */
+  private mayPresentAs(state: unknown): boolean {
+    if (state === null) return true;
+    // Already validated against presenceSchema by readAwarenessEntries.
+    const id = (state as Presence).user.id;
+    return this.identity.userId === null
+      ? id.startsWith(GUEST_PRESENCE_PREFIX)
+      : id === this.identity.userId;
+  }
+
   private handleAwareness(update: Uint8Array): void {
     this.options.metrics.messages.inc({ type: "awareness" });
     const entries = readAwarenessEntries(update);
@@ -245,6 +261,10 @@ export class SyncConnection extends RoomConnection<Room> {
       return;
     }
     const { awarenessOwners, remoteAwareness } = this.room;
+    if (entries.some(({ state }) => !this.mayPresentAs(state))) {
+      this.options.metrics.messages.inc({ type: "awareness_impersonation" });
+      return;
+    }
     if (entries.some(({ clientId }) => !this.mayClaim(clientId))) {
       this.options.metrics.messages.inc({ type: "awareness_spoofed" });
       return;

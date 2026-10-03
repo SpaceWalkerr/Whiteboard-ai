@@ -3,7 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useParams } from "react-router";
 import { boardDetailSchema, ticketResponseSchema } from "@whiteboard/shared/api";
 import type { WebEnv } from "@whiteboard/shared/env/web";
-import { boardIdSchema, bytesToBase64, encryptText, type RoomKey } from "@whiteboard/shared/sync";
+import {
+  boardIdSchema,
+  bytesToBase64,
+  encryptText,
+  GUEST_PRESENCE_PREFIX,
+  type RoomKey,
+} from "@whiteboard/shared/sync";
 import { useAuth } from "@/auth/authContext";
 import { FullPageMessage, LoadingPage } from "@/auth/RequireAuth";
 import {
@@ -35,7 +41,7 @@ export function BoardRoute({ env }: { env: WebEnv }) {
   const location = useLocation();
   const queryClient = useQueryClient();
   const shareToken = shareTokenFor(boardId);
-  const [guestId] = useState(() => `guest-${crypto.randomUUID()}`);
+  const [guestId] = useState(() => `${GUEST_PRESENCE_PREFIX}${crypto.randomUUID()}`);
 
   const detail = useQuery({
     queryKey: ["board", boardId, status],

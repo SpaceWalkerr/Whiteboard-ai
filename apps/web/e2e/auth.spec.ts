@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { createE2EUser, deleteE2EUsers, signInWithMagicLink } from "./auth";
 import { createShareLink, insertShape, joinViaLink, openBoard, shapes } from "./helpers";
 

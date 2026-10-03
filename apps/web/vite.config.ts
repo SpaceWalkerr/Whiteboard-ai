@@ -10,6 +10,8 @@ import { VitePWA } from "vite-plugin-pwa";
 // module-runner loader (`--configLoader runner`, set in every package.json script).
 import { loadEnv } from "@whiteboard/shared/env";
 import { webEnvSchema } from "@whiteboard/shared/env/web";
+import { THEME_SCRIPT } from "./src/site/theme";
+import { cspPlugin } from "./scripts/csp";
 import { prerenderPlugin } from "./scripts/prerenderPlugin";
 
 /**
@@ -36,9 +38,8 @@ function previewRouting(): Plugin {
 
 export default defineConfig(({ command, mode, isSsrBuild }) => {
   // Fail the production build (not just the page at runtime) when public env is missing.
-  if (command === "build") {
-    loadEnv(webEnvSchema, loadViteEnv(mode, process.cwd(), "VITE_"));
-  }
+  const env =
+    command === "build" ? loadEnv(webEnvSchema, loadViteEnv(mode, process.cwd(), "VITE_")) : null;
 
   return {
     plugins: [
@@ -48,6 +49,10 @@ export default defineConfig(({ command, mode, isSsrBuild }) => {
       ...(isSsrBuild
         ? []
         : [
+            cspPlugin(() => {
+              if (!env) throw new Error("the CSP is only built for production builds");
+              return { env, inlineScripts: [THEME_SCRIPT] };
+            }),
             prerenderPlugin(),
             previewRouting(),
             // Service worker: precaches the app shell and the prerendered pages, so a board

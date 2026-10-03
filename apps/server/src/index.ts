@@ -21,6 +21,7 @@ import { resolveInstanceId } from "./cluster/instanceId";
 import { RedisLease } from "./cluster/lease";
 import { RedisRoomBus, type RoomBusMetrics } from "./cluster/roomBus";
 import { attachSyncServer } from "./sync/upgrade";
+import { createWindowLimiter } from "./http/windowLimiter";
 import { loadPublicState } from "./interview/service";
 import { RazorpayProvider } from "./billing/razorpay";
 import type { BillingConfig } from "./billing/context";
@@ -144,6 +145,16 @@ async function main(): Promise<void> {
       burst: env.SYNC_RATE_LIMIT_BURST,
       bytesPerSecond: env.SYNC_BYTES_PER_SEC,
       bytesBurst: env.SYNC_BYTES_BURST,
+    },
+    upgradeLimits: {
+      perIp: createWindowLimiter({
+        max: env.SYNC_UPGRADES_PER_MIN_PER_IP,
+        windowMs: 60_000,
+        prefix: "whiteboard:ws-upgrade:",
+        redis,
+      }),
+      trustProxy: env.TRUST_PROXY,
+      maxConnectionsPerUser: env.SYNC_MAX_CONNECTIONS_PER_USER,
     },
     repository: syncRepository,
     flushMs: env.SYNC_FLUSH_MS,

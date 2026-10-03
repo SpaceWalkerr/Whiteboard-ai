@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { deleteE2EUsers } from "./auth";
 import { arrows, center, drag, openBoard, shapes, toScreen } from "./helpers";
 

@@ -1,7 +1,8 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { boards, eq, lt, sql } from "@whiteboard/shared/db";
 import { audit } from "../audit/audit";
 import { UnauthorizedError } from "../errors";
+import { bearerMatches } from "../http/bearer";
 import { TRASH_RETENTION_DAYS } from "./boards";
 import { runBillingSweep } from "../billing/service";
 import { billingContext, type ApiDeps } from "./deps";
@@ -17,9 +18,7 @@ export function registerInternalRoutes(app: FastifyInstance, deps: ApiDeps): voi
    * sends the "downgraded" email for plans that ended. Idempotent.
    */
   app.post("/internal/billing-sweep", async (request) => {
-    if (!deps.cronSecret || request.headers.authorization !== `Bearer ${deps.cronSecret}`) {
-      throw new UnauthorizedError("A valid cron secret is required.");
-    }
+    requireCronSecret(deps, request);
     return runBillingSweep(billingContext(deps));
   });
 
@@ -28,9 +27,7 @@ export function registerInternalRoutes(app: FastifyInstance, deps: ApiDeps): voi
    * and thumbnail). Called by a Render Cron Job with the CRON_SECRET bearer token.
    */
   app.post("/internal/purge-trash", async (request) => {
-    if (!deps.cronSecret || request.headers.authorization !== `Bearer ${deps.cronSecret}`) {
-      throw new UnauthorizedError("A valid cron secret is required.");
-    }
+    requireCronSecret(deps, request);
     const expired = await deps.db
       .select({ id: boards.id, orgId: boards.orgId, thumbnailPath: boards.thumbnailPath })
       .from(boards)
@@ -61,4 +58,11 @@ export function registerInternalRoutes(app: FastifyInstance, deps: ApiDeps): voi
     }
     return { purged: expired.length };
   });
+}
+
+/** Cron endpoints are disabled without a CRON_SECRET; the bearer is compared in constant time. */
+function requireCronSecret(deps: ApiDeps, request: FastifyRequest): void {
+  if (!deps.cronSecret || !bearerMatches(request.headers.authorization, deps.cronSecret)) {
+    throw new UnauthorizedError("A valid cron secret is required.");
+  }
 }

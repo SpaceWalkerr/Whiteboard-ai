@@ -1,5 +1,10 @@
 export { backoffDelay, type BackoffOptions } from "./backoff";
-export { presenceSchema, type Presence, type PresenceUser } from "./presence";
+export {
+  GUEST_PRESENCE_PREFIX,
+  presenceSchema,
+  type Presence,
+  type PresenceUser,
+} from "./presence";
 export {
   boardIdSchema,
   CLOSE_CODES,

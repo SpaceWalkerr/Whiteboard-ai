@@ -1,7 +1,8 @@
-// Root config only covers files at the repo root; each workspace package has its own config.
-import { base } from "@whiteboard/config/eslint/base";
+// Root config only covers files at the repo root (Node scripts and tool configs); each
+// workspace package has its own config.
+import { node } from "@whiteboard/config/eslint/node";
 
 export default [
   { ignores: ["apps/**", "packages/**"] },
-  ...base({ tsconfigRootDir: import.meta.dirname }),
+  ...node({ tsconfigRootDir: import.meta.dirname }),
 ];

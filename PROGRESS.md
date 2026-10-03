@@ -2,9 +2,14 @@
 
 ## Current phase
 
-Phase 10 — Billing, plans and limits: implemented, awaiting manual verification (needs Razorpay
-test-mode keys and plans, see below). Phases 0–9 committed (the Phase 7 eval still needs a
-first run with a real `ANTHROPIC_API_KEY`).
+Phase 12 — Launch hardening, split into 12a–12e (each verified separately).
+**12a — Security hardening: implemented, awaiting manual verification** (below). Next: 12b
+(observability: Sentry, request ids, PostHog server events, uptime).
+
+Phase 11 (public site: landing, pricing, templates, docs, legal, prerendering) is committed
+(`a2fa0a2`) but not yet written up here; 12a was built on top of it. Phase 10 still needs its
+Razorpay test-mode verification; the Phase 7 eval still needs a first run with a real
+`ANTHROPIC_API_KEY`.
 
 ## Done
 
@@ -722,6 +727,91 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
   dialog titles). Playwright +2 (`billing.spec.ts`: real 4th-board limit → prompt → pricing;
   mocked Razorpay checkout → refresh → "Your plan: Pro").
 
+### Phase 12a — Security hardening
+
+Full write-up, OWASP Top 10 walkthrough and findings table: [docs/security.md](docs/security.md).
+
+- **Web headers + strict CSP.** `apps/web/vercel.json`: HSTS, `frame-ancestors 'none'`,
+  `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, COOP
+  `same-origin-allow-popups`. The CSP itself is generated at build time from the
+  environment's `VITE_*` URLs (`apps/web/scripts/csp.ts`, Vite plugin `whiteboard:csp`) and put
+  in a `<meta>` tag at the top of index.html → app.html and all prerendered pages. Scripts:
+  `'self'`, the sha256 of the dark-mode head script, Razorpay Checkout, `'wasm-unsafe-eval'`
+  (PDF export). No `unsafe-inline`/`unsafe-eval` for scripts. zod runs jitless in the browser
+  (`src/lib/zodConfig.ts`) and PostHog with `disable_external_dependency_loading`.
+- **Privacy bug fixed:** PostHog recorded full URLs including the fragment, i.e. a private
+  board's `#key=…` for visitors who accepted analytics. `before_send` now strips fragments from
+  every URL-like value in every event (`src/lib/privacy.ts`).
+- **API headers** on every response incl. errors and the review event stream (CSP
+  `default-src 'none'`, `nosniff`, `DENY`, `no-referrer`, COOP, HSTS, `Cache-Control: no-store`
+  by default) — `apps/server/src/http/securityHeaders.ts`, hooks in `app.ts`.
+- **CSRF (defence in depth):** the API scope no longer parses `text/plain`; form and
+  multipart bodies were already unparsed → 415 before route code. (No cookies exist, so
+  classic CSRF was already impossible.)
+- **Rate limits:** `/internal/*` 30/min/IP, the Razorpay webhook 600/min/IP (own scopes with
+  the Redis store). WebSocket upgrades: `SYNC_UPGRADES_PER_MIN_PER_IP` (120) per client IP per
+  minute across instances (`http/windowLimiter.ts`, Redis Lua INCR+PEXPIRE, in-memory without
+  Redis), checked **before** ticket verification and the DB re-check; and
+  `SYNC_MAX_CONNECTIONS_PER_USER` (20) open sockets per user per instance. Client IP honours
+  `TRUST_PROXY` like Fastify (`http/clientIp.ts`). `/readyz` coalesces concurrent probes.
+- **Input size:** default body limit 1 MB → 256 kB (`DEFAULT_BODY_LIMIT`); 1 MB kept for
+  `POST /boards/:id/reviews` (private graphs). The private-review graph schema is bounded
+  (≤ 5,000 nodes/edges, labels ≤ 500, instances ≤ 1,000); graphs the server builds itself keep
+  the unbounded schema so stored rows still parse. All other request schemas were already
+  bounded (audited).
+- **SSRF:** `createSafeFetch` (`http/safeFetch.ts`) — exact-origin allowlist, no userinfo, no
+  redirects, 15 s default timeout — now wraps Supabase Storage and Razorpay calls.
+- **Presence impersonation** (Later item from Phase 5): the sync server drops awareness
+  states whose `user.id` isn't the socket's user (signed in) or a `guest-` id (anonymous);
+  metric `awareness_impersonation`. `GUEST_PRESENCE_PREFIX` shared with the web app.
+- Cron secret compared in constant time (`http/bearer.ts`, shared with `/metrics`); return
+  path after sign-in refuses `/\host`; `x-share-token` added to log redaction.
+- **Dependencies:** `pnpm audit --prod` clean. `fflate` pinned `^0.7.5` (`overrides` in
+  `pnpm-workspace.yaml`). 5 dev-tool advisories remain, assessed in docs/security.md.
+- **Secrets:** `scripts/secret-scan.mjs` (dependency-free) scanned the index and the full
+  history of every ref: nothing found (fixtures use the `0123456789` marker). `pnpm
+security:secrets`, `pnpm security:audit`.
+- **CI:** new `security` job — `pnpm audit --prod --audit-level=high`, the secret scan, and
+  gitleaks v8 (Docker image, `.gitleaks.toml`) over the full history.
+- **E2E runs under the real CSP:** `apps/web/e2e/fixtures.ts` fails any test on a
+  `securitypolicyviolation` (also in contexts the test opens itself); all specs import `test`
+  from it. The stale smoke test (it looked for the pre-Phase-11 "Server: ok" widget) now checks
+  the landing page and a `fetch` to the API from the page (CSP + CORS).
+- **Tests** (`pnpm lint && pnpm typecheck && pnpm test` on 2026-09-28, all green: server 287,
+  web 159, shared 166, graph 98, loadtest 5, config 5). New: server `security.test.ts`
+  (headers on every response kind; 415 for text/plain, url-encoded and multipart on **every**
+  mutating route from the route table; no credentialed CORS; 413 over 256 kB; **every** API
+  route reaches 429; cron and webhook limits; health checks unlimited; log redaction),
+  `upgradeLimits.test.ts` (IP from trusted proxy hops, window limiter, 429 before authorize,
+  per-user socket cap), `windowLimiter.redis.test.ts` (budget shared across instances, TTL
+  set), `safeFetch.test.ts` (11), presence impersonation in `sync.integration.test.ts`;
+  web `scripts/csp.test.ts`, `lib/__tests__/privacy.test.ts` (fragment scrubbing, PostHog
+  config, return paths); graph: bounded private graph. Playwright under the CSP: 23/24 — the
+  2,000-shape load-time test failed at 1.5 s+ as before (see Known issues); a probe spec
+  injecting an inline script was caught by the fixture (then deleted).
+
+**Verify 12a manually**
+
+1. `pnpm lint && pnpm typecheck && pnpm test` → all green.
+2. `pnpm security:audit` → "No known vulnerabilities found"; `pnpm security:secrets` →
+   "secret scan: nothing found (full history + working tree)".
+3. `pnpm --filter @whiteboard/web build`, then
+   `grep -o 'Content-Security-Policy" content="[^"]*' apps/web/dist/app.html` → the policy with
+   your API/WS/Supabase hosts and no `unsafe-eval`.
+4. `pnpm --filter @whiteboard/web test:e2e` → 23–24 passed (only the 2,000-shape timing test
+   may fail); no "Content Security Policy violations" failures.
+5. `pnpm dev`, then `curl -si http://localhost:4000/healthz | grep -iE
+"content-security|x-frame|no-store"` → the API headers.
+6. CSRF: `curl -si -X POST http://localhost:4000/boards -H 'content-type: text/plain' -d x`
+   → `415`.
+7. WebSocket limit: `SYNC_UPGRADES_PER_MIN_PER_IP=3 pnpm dev`, open a board and reload it 4–5
+   times quickly → the 4th connection within the minute shows "Reconnecting…" and the server
+   logs "too many upgrades from this IP" (then it reconnects the next minute).
+8. PostHog fragment scrub: with `VITE_POSTHOG_KEY` set, accept analytics, open a private
+   board; in the browser devtools Network tab, PostHog's `/e/` requests contain no `#key=`.
+9. On a Vercel preview: `curl -sI https://<preview>/ | grep -iE "strict-transport|frame|
+permissions"` → the headers from vercel.json.
+
 ## Decisions
 
 - **Tool versions — proven majors over newest.** TypeScript 5.9 (typescript-eslint 8 supports
@@ -1011,6 +1101,31 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
     more than 3 boards); the limits themselves have their own suites.
   - No new dependencies.
 
+- **Phase 12a:**
+  - CSP delivered as a build-time `<meta>` tag (hosts differ per environment; vercel.json is
+    static) + a header for `frame-ancestors`/`object-src`/`base-uri`. No CSP reporting yet
+    (a meta CSP can't carry `report-to`); Sentry's CSP endpoint can be added as a header in 12b.
+  - `style-src 'unsafe-inline'` accepted: prerendered React `style` attributes and Radix
+    positioning need it; CSS injection can't execute script.
+  - The inline dark-mode script is allowed by hash (no extra blocking request, no flash)
+    rather than moved to a file.
+  - HSTS without `preload` until the production domain is final (preload is hard to undo).
+  - COOP `same-origin-allow-popups` on the web (Razorpay popups talk back to the opener);
+    `same-origin` on the API.
+  - WebSocket upgrade limit keyed by IP, fail-open on Redis errors (an outage mustn't lock
+    everyone out; per-message limits still apply). 120/min per IP leaves room for a class or
+    office behind one NAT reconnecting after a deploy. The per-user socket cap is per
+    instance (no cross-instance counting needed for abuse protection).
+  - Bounded only the browser-supplied private graph, not `designGraphSchema` (stored graphs
+    are re-parsed on read and must keep parsing).
+  - Secret scanning: our own dependency-free script (runs locally with only Node) plus
+    gitleaks in CI via its Docker image (no licence needed, unlike gitleaks-action for orgs).
+    Test fixtures are allowlisted by the `0123456789` marker, not by path.
+  - Accepted dev-only advisories (drizzle-kit/esbuild, loadtest/esbuild, lighthouse/
+    extract-zip + opentelemetry) instead of forcing major-version overrides that could break
+    those tools.
+  - New dependencies: none.
+
 ## Known issues
 
 - `pnpm db:migrate` and the RLS test have not yet run against a real database: they need the
@@ -1193,6 +1308,16 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
 - Web bundle: `/pricing` and billing settings are separate lazy chunks; the upgrade dialog
   (board, dashboard) pulls in only the small feature table.
 
+- **Phase 12a:** presence display names still come from the client (ids are enforced). A
+  signed-in user could label their cursor "Alice". Fix later by putting the display name in
+  the room ticket.
+- The web build still publishes source maps (`build.sourcemap: true`); 12b switches to hidden
+  maps uploaded to Sentry.
+- CSP violations in production aren't reported anywhere yet (12b).
+- `SYNC_MAX_CONNECTIONS_PER_USER` is per instance: with 2 instances a user can hold up to 2×.
+- The E2E CSP fixture patches `browser.newContext` for the duration of a test; if Playwright
+  changes how fixtures and `browser` interact this may need revisiting.
+
 ## Later
 
 - Phase 10 follow-ups: Merchant of Record provider (Paddle / Lemon Squeezy) for USD customers
@@ -1201,7 +1326,6 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
   settings; admin coupon management UI (coupons are rows today); an `email_outbox` if emails
   must be exactly-once; PostHog events for upgrade prompt shown / checkout started / paid.
 - Phase 11: prerender `/pricing` (it's a client-rendered route now).
-- Phase 12: CSP must allow `https://checkout.razorpay.com` (script + frame).
 
 - Phase 9 follow-ups: key rotation (re-encrypt into a new board/key and revoke the old),
   browser-side duplicate/export of private boards, the account "export all my boards" must
@@ -1230,8 +1354,6 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
 - If Redis or the DB becomes the limit (docs/scaling.md → bottlenecks): coalesce presence per
   room per tick and skip publishing for rooms no other instance holds; append several rooms'
   batches in one statement; load a board in one query instead of three.
-- Phase 12 (security): enforce presence `user.id` == the socket's authenticated user id
-  server-side (today a client may display any id/name in its own presence).
 - Unscheduled (not built in Phase 10): retention limits for archived history per plan.
 - Nice-to-have (unscheduled): orthogonal arrow routing, nested groups, arrow label drag.
 - Unscheduled: live rule checks while drawing (cheap — ~17 ms for 2,000 shapes) alongside
@@ -1243,7 +1365,9 @@ downgrade`, `team.member_add/remove`, `editor_seat.release`.
 - Phase 13: Render Cron Job calling `POST /internal/purge-trash` daily with `CRON_SECRET`;
   set `TRUST_PROXY=1` on Render so rate limits see real client IPs.
 - Phase 11: prerender public pages (landing, pricing, templates, docs, legal) at build time.
-- Phase 12: Sentry + PostHog, security headers in `vercel.json`, audit logging.
+- Phase 12b: Sentry + PostHog (security headers done in 12a).
+- Later (12a): presence display name from the room ticket; SRI / published build hashes;
+  HSTS preload once the domain is final; CSP reporting endpoint.
 - Phase 13: production migrations via Render `preDeployCommand` (the migrate script currently runs
   through `tsx`, a dev dependency — bundle it or install dev deps on Render); real staging/prod
   services; `CORS_ALLOWED_ORIGIN_PATTERN` for this project's Vercel previews.

@@ -60,6 +60,8 @@ const reviewParams = z.object({ id: z.uuid(), reviewId: z.uuid() });
 const HINT_MIN_COMPONENTS = 3;
 const PROGRESS_INTERVAL_MS = 500;
 const HEARTBEAT_MS = 15_000;
+/** Review requests may carry a private board's graph: more than the 256 kB default. */
+const GRAPH_BODY_LIMIT = 1024 * 1024;
 
 /** User-safe messages for failed reviews. None of these count toward the quota. */
 const FAILURE_MESSAGES: Partial<Record<AiCallStatus, { code: string; message: string }>> = {
@@ -313,7 +315,8 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ApiDeps): void 
    */
   app.post(
     "/boards/:id/reviews",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    // A private board's graph comes with the request (up to AI_REVIEW_MAX_ELEMENTS elements).
+    { bodyLimit: GRAPH_BODY_LIMIT, config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const user = requireUser(request);
       const { id } = parse(idParams, request.params);

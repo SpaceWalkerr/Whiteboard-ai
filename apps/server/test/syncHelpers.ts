@@ -14,7 +14,12 @@ import type { App } from "../src/app";
 import { allowAllConnections, type AuthorizeConnection } from "../src/sync/auth";
 import { createSyncMetrics, type SyncMetrics } from "../src/sync/metrics";
 import type { RevocationBus } from "../src/revocation/bus";
-import { attachSyncServer, type ClusterOptions, type SyncServer } from "../src/sync/upgrade";
+import {
+  attachSyncServer,
+  type ClusterOptions,
+  type SyncServer,
+  type UpgradeLimits,
+} from "../src/sync/upgrade";
 import { MemoryBoardRepository } from "../src/persistence/memoryRepository";
 import type { BoardRepository } from "../src/persistence/repository";
 import { silentLogger, testApp } from "./helpers";
@@ -47,6 +52,7 @@ export async function startServer(
     /** One of several instances sharing rooms through Redis. */
     cluster?: ClusterOptions;
     revocations?: RevocationBus;
+    upgradeLimits?: UpgradeLimits;
   } = {},
 ): Promise<TestServer> {
   const metrics = createSyncMetrics();
@@ -68,6 +74,7 @@ export async function startServer(
     snapshotEvery: options.snapshotEvery ?? 500,
     cluster: options.cluster,
     revocations: options.revocations,
+    upgradeLimits: options.upgradeLimits,
   });
   await app.listen({ host: "127.0.0.1", port: options.port ?? 0 });
   const { port } = app.server.address() as AddressInfo;

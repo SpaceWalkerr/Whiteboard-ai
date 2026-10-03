@@ -79,6 +79,14 @@ export const serverEnvSchema = z
       .min(1024)
       .default(16 * 1024 * 1024),
 
+    /**
+     * WebSocket upgrades allowed per client IP per minute (shared across instances through
+     * Redis). Generous enough for a classroom behind one NAT reconnecting after a deploy.
+     */
+    SYNC_UPGRADES_PER_MIN_PER_IP: z.coerce.number().int().min(1).max(100_000).default(120),
+    /** Open sockets one signed-in user may hold on one instance (tabs × boards). */
+    SYNC_MAX_CONNECTIONS_PER_USER: z.coerce.number().int().min(1).max(1_000).default(20),
+
     /** Longest an incoming update waits before it is written to the database (batching window). */
     SYNC_FLUSH_MS: z.coerce.number().int().min(1).max(1000).default(50),
     /** Fold a board's update log into a snapshot after this many updates. */

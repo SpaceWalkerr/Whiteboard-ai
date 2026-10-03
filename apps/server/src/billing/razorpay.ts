@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { createSafeFetch } from "../http/safeFetch";
 import type { SubscriptionStatus } from "@whiteboard/shared/entitlements";
 import {
   ProviderError,
@@ -134,8 +135,9 @@ export class RazorpayProvider implements BillingProvider {
 
   constructor(private readonly options: RazorpayOptions) {
     this.publicKey = options.keyId;
-    this.fetchImpl = options.fetch ?? fetch;
     this.baseUrl = options.baseUrl ?? "https://api.razorpay.com/v1";
+    // Only Razorpay's API, whatever ends up in a path (ids are also checked before use).
+    this.fetchImpl = createSafeFetch([this.baseUrl], options.fetch ?? fetch);
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
 

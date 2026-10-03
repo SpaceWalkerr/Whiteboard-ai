@@ -1,0 +1,18 @@
+# gitleaks configuration for CI (see .github/workflows/ci.yml → security).
+# Default rules, plus this repo's test-fixture convention: fake secrets contain "0123456789",
+# which a real random key essentially never does. Keep in sync with scripts/secret-scan.mjs.
+title = "whiteboard-ai"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deterministic test fixtures and documentation placeholders"
+regexes = [
+  '''0123456789''',
+  '''postgres(ql)?://postgres:postgres@''',
+  '''sb_publishable_ci_placeholder''',
+]
+paths = [
+  '''pnpm-lock\.yaml''',
+]

@@ -2,12 +2,15 @@ import { pino, type Logger, type LoggerOptions } from "pino";
 import type { ServerEnv } from "@whiteboard/shared/env/server";
 
 /** Paths that may carry credentials. Redacted defensively even though we don't log headers today. */
-const REDACT_PATHS = [
+export const REDACT_PATHS = [
   "req.headers.authorization",
   "req.headers.cookie",
   'res.headers["set-cookie"]',
   "headers.authorization",
   "headers.cookie",
+  // Share-link tokens are bearer credentials too.
+  'req.headers["x-share-token"]',
+  'headers["x-share-token"]',
 ];
 
 export function createLogger(env: Pick<ServerEnv, "LOG_LEVEL" | "NODE_ENV">): Logger {

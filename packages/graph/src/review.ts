@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { designGraphSchema, findingSchema, severitySchema, type DesignGraph } from "./types";
+import {
+  designGraphSchema,
+  findingSchema,
+  graphEdgeSchema,
+  graphNodeSchema,
+  ignoredShapeSchema,
+  severitySchema,
+  type DesignGraph,
+} from "./types";
 
 /**
  * The AI design review contract (Phase 7): what the server returns and stores, the streamed
@@ -34,8 +42,36 @@ export const REQUIREMENTS_MAX = 2000;
  * extracts the graph and sends only that — after the user agreed, for this review, to it
  * being sent to our server and Anthropic. Nothing is kept unless `store` is true.
  */
+/**
+ * A graph sent by a browser is untrusted input: every string and list is bounded (the server
+ * also refuses graphs above AI_REVIEW_MAX_ELEMENTS, at most 5,000). Graphs the server builds
+ * itself keep the unbounded `designGraphSchema`.
+ */
+export const GRAPH_INPUT_LIMITS = { elements: 5_000, label: 500, ignored: 20_000 } as const;
+const graphInputSchema = z.object({
+  nodes: z
+    .array(
+      graphNodeSchema.extend({
+        label: z.string().max(GRAPH_INPUT_LIMITS.label),
+        props: graphNodeSchema.shape.props.extend({ instances: z.number().int().min(1).max(1000) }),
+      }),
+    )
+    .max(GRAPH_INPUT_LIMITS.elements),
+  edges: z
+    .array(graphEdgeSchema.extend({ label: z.string().max(GRAPH_INPUT_LIMITS.label) }))
+    .max(GRAPH_INPUT_LIMITS.elements),
+  ignored: z
+    .array(
+      ignoredShapeSchema.extend({
+        shapeId: z.string().max(200).nullable(),
+        shapeType: z.string().max(64).nullable(),
+      }),
+    )
+    .max(GRAPH_INPUT_LIMITS.ignored),
+});
+
 export const privateReviewInputSchema = z.object({
-  graph: designGraphSchema,
+  graph: graphInputSchema,
   consent: z.literal(true),
   /** Keep this review (graph, problem statement, result) on the server, readable by it. */
   store: z.boolean(),
